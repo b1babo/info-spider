@@ -1,5 +1,7 @@
 # Info-Spider
 
+[English](README.md) | [中文文档](README.zh-CN.md)
+
 <div align="center">
 
 **一个灵活的模块化社交媒体平台爬虫框架**

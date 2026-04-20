@@ -1,5 +1,7 @@
 # Info-Spider
 
+[English](README.md) | [中文文档](README.zh-CN.md)
+
 <div align="center">
 
 **A flexible, actor-based web scraping framework for social media platforms**
