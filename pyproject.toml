@@ -1,0 +1,42 @@
+[project]
+name = "info-spider"
+version = "0.1.0"
+description = "A flexible, actor-based web scraping framework for social media platforms"
+readme = "README.md"
+requires-python = ">=3.13"
+license = {text = "MIT"}
+authors = [
+    {name = "b1babo"}
+]
+keywords = ["web-scraping", "twitter", "reddit", "playwright", "social-media"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+    "apscheduler>=3.11.1",
+    "fastapi>=0.135.3",
+    "graphene>=3.4.3",
+    "httpx>=0.28.1",
+    "jmespath>=1.0.1",
+    "playwright>=1.56.0",
+    "pydantic>=2.12.5",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.5",
+    "uvicorn>=0.43.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/b1babo/info-spider"
+Repository = "https://github.com/b1babo/info-spider"
+Issues = "https://github.com/b1babo/info-spider/issues"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+

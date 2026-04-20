@@ -1,0 +1,44 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Virtual environments
+.venv
+.venv.bak/
+.opencode
+.claude
+
+# Project specific
+data/
+logs/
+*.pid
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config files (keep sensitive data out of git)
+config.yaml
+
+# Lock files (optional - uncomment if using uv/pip-tools)
+uv.lock
+# requirements.lock

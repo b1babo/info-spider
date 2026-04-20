@@ -1,0 +1,307 @@
+# ============================================================
+# Info-Spider 配置文件示例
+# ============================================================
+# 使用说明：
+# 1. 复制此文件为 config.yaml: cp config.yaml.example config.yaml
+# 2. 根据你的环境修改配置项
+# 3. config.yaml 包含敏感信息，不会被提交到 Git
+# ============================================================
+
+# ============================================================
+# 浏览器/API 配置 (Profiles)
+# ============================================================
+# Profiles 定义了浏览器连接或 API 配置
+# mode 可选值: "browser" (浏览器模式) | "api" (API 模式)
+
+profiles:
+  # ------------------------------------------------------------
+  # Twitter/X 浏览器配置
+  # ------------------------------------------------------------
+  - name: "twitter"
+    mode: "browser"
+    # 浏览器主机地址
+    # - 本地浏览器: "127.0.0.1" 或 "localhost"
+    # - 远程浏览器: "192.168.x.x" (Windows/Linux 机器的 IP)
+    browser_host: "127.0.0.1"
+    # Chrome/Edge 远程调试端口
+    port: 9222
+    # 浏览器类型: "chromium" | "chrome" | "msedge"
+    browser_type: "chromium"
+
+  # ------------------------------------------------------------
+  # Reddit 浏览器配置
+  # ------------------------------------------------------------
+  - name: "reddit"
+    mode: "browser"
+    browser_host: "127.0.0.1"
+    port: 9223
+    browser_type: "chromium"
+
+  # ------------------------------------------------------------
+  # Product Hunt API 配置
+  # ------------------------------------------------------------
+  - name: "product_hunt"
+    mode: "api"
+    # 可选：代理地址 (格式: http://host:port 或 socks5://host:port)
+    proxy: null
+    params:
+      # 在 https://www.producthunt.com/v2/api-key 获取 API Key
+      api_key: "YOUR_PRODUCT_HUNT_API_KEY_HERE"
+
+  # ------------------------------------------------------------
+  # 带代理的 API 配置示例
+  # ------------------------------------------------------------
+  - name: "api_with_proxy"
+    mode: "api"
+    proxy: "http://127.0.0.1:7890"
+    params: {}
+
+# ============================================================
+# Actor 定义
+# ============================================================
+# Actors 是各个平台的数据抓取处理器
+# 通常不需要修改此部分，除非你添加了新的 Actor
+
+actors:
+  - name: "twitter_user_actor"
+    class: "TwitterUserActor"
+    description: "Twitter/X用户页面操作Actor"
+
+  - name: "twitter_trending_actor"
+    class: "TwitterTrendingActor"
+    description: "Twitter/X趋势页面操作Actor"
+
+  - name: "twitter_random_reading_actor"
+    class: "TwitterRandomReadingActor"
+    description: "Twitter/X首页随机推荐Actor（为你推荐/关注双Tab）"
+
+  - name: "reddit_community_actor"
+    class: "RedditCommunityActor"
+    description: "Reddit社区帖子操作Actor"
+
+  - name: "product_hunt_actor"
+    class: "ProductHuntActor"
+    description: "Product Hunt API操作Actor（无需浏览器）"
+
+  - name: "google_trends_actor"
+    class: "GoogleTrendsActor"
+    description: "Google Trends趋势分析Actor"
+
+  - name: "google_suggest_actor"
+    class: "GoogleSuggestActor"
+    description: "Google 搜索建议关键词挖掘Actor（无需浏览器）"
+
+  - name: "google_search_actor"
+    class: "GoogleSearchActor"
+    description: "Google 搜索结果抓取Actor（浏览器模式）"
+
+  - name: "bing_search_actor"
+    class: "BingSearchActor"
+    description: "Bing 搜索结果抓取Actor（浏览器模式）"
+
+# ============================================================
+# 任务列表 (Tasks)
+# ============================================================
+# 定义要执行的数据抓取任务
+# enable: true/false - 是否启用任务
+
+tasks:
+  # ------------------------------------------------------------
+  # Twitter 用户推文抓取示例
+  # ------------------------------------------------------------
+  - name: "github_tweets"
+    url: "https://x.com/GitHub_Daily"
+    actor: "twitter_user_actor"
+    use_profile: "twitter"
+    enable: true
+    # 可选：定时任务配置
+    # cron:
+    #   hour: "10"    # 每天 10 点执行
+    #   minute: "0"
+    actions:
+      - action: "create"
+        params:
+          url: "https://x.com/GitHub_Daily"
+        enabled: true
+      - action: "scroll_and_extract"
+        params:
+          scroll_times: 20        # 滚动次数
+          max: 100               # 最大抓取数量
+          time_range: 48         # 时间范围（小时）
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Twitter 用户推文抓取 - 你的目标用户
+  # ------------------------------------------------------------
+  - name: "target_user_tweets"
+    url: "https://x.com/TARGET_USERNAME"
+    actor: "twitter_user_actor"
+    use_profile: "twitter"
+    enable: false
+    actions:
+      - action: "create"
+        params:
+          url: "https://x.com/TARGET_USERNAME"
+        enabled: true
+      - action: "scroll_and_extract"
+        params:
+          scroll_times: 20
+          max: 100
+          time_range: 24
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Twitter 热门趋势
+  # ------------------------------------------------------------
+  - name: "twitter_trending"
+    url: "https://x.com/explore/tabs/trending"
+    actor: "twitter_trending_actor"
+    use_profile: "twitter"
+    enable: false
+    actions:
+      - action: "create"
+        params:
+          url: "https://x.com/explore/tabs/trending"
+        enabled: true
+      - action: "extract_trends"
+        params:
+          max: 50
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Reddit 社区帖子抓取
+  # ------------------------------------------------------------
+  - name: "reddit_programming"
+    url: "https://www.reddit.com/r/programming/"
+    actor: "reddit_community_actor"
+    use_profile: "reddit"
+    enable: false
+    actions:
+      - action: "create"
+        params:
+          url: "https://www.reddit.com/r/programming/"
+        enabled: true
+      - action: "scroll_and_extract"
+        params:
+          scroll_times: 5
+          max: 20
+          max_comments_depth: 2
+          max_comments_per_level: 3
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Product Hunt 每日产品
+  # ------------------------------------------------------------
+  - name: "product_hunt_daily"
+    url: "https://www.producthunt.com"
+    actor: "product_hunt_actor"
+    use_profile: "product_hunt"
+    enable: false
+    actions:
+      - action: "fetch_posts"
+        params:
+          days_back: 1
+          per_page: 20
+        enabled: true
+      - action: "extract_posts"
+        params:
+          max: 100
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Google Trends 趋势分析
+  # ------------------------------------------------------------
+  - name: "google_trends"
+    url: "https://trends.google.com/explore"
+    actor: "google_trends_actor"
+    use_profile: "twitter"
+    enable: false
+    actions:
+      - action: "create"
+        params: {}
+        enabled: true
+      - action: "search_trends"
+        params:
+          keyword: "AI"              # 搜索关键词
+          time_range: "today 12-m"   # 时间范围
+        enabled: true
+      - action: "extract_trends"
+        params:
+          max: 100
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Google 搜索建议
+  # ------------------------------------------------------------
+  - name: "google_suggest"
+    url: ""
+    actor: "google_suggest_actor"
+    use_profile: "api_with_proxy"
+    enable: false
+    actions:
+      - action: "create"
+        params: {}
+        enabled: true
+      - action: "expand_keywords"
+        params:
+          seed: "python"       # 种子关键词
+          alphabet: true       # 字母扩展 (a, b, c...)
+          questions: true      # 问题扩展 (how, what, why...)
+          modifiers: true      # 修饰词扩展 (best, top, free...)
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Google 搜索结果
+  # ------------------------------------------------------------
+  - name: "google_search"
+    url: "https://www.google.com"
+    actor: "google_search_actor"
+    use_profile: "twitter"
+    enable: false
+    actions:
+      - action: "create"
+        params:
+          query: "python async await"
+          language: "en"
+          num: 10
+        enabled: true
+      - action: "extract_results"
+        params:
+          max: 20
+        enabled: true
+
+  # ------------------------------------------------------------
+  # Bing 搜索结果
+  # ------------------------------------------------------------
+  - name: "bing_search"
+    url: "https://www.bing.com"
+    actor: "bing_search_actor"
+    use_profile: "twitter"
+    enable: false
+    actions:
+      - action: "create"
+        params:
+          query: "python async await"
+          language: "en-us"
+          count: 10
+        enabled: true
+      - action: "extract_results"
+        params:
+          max: 20
+        enabled: true
+
+# ============================================================
+# 远程浏览器设置指南
+# ============================================================
+#
+# Windows 上启动远程浏览器:
+#   msedge.exe --remote-debugging-port=9222 --user-data-dir="./profiles/twitter"
+#
+# Linux 上启动远程浏览器:
+#   chromium --remote-debugging-port=9222 --user-data-dir="./profiles/twitter"
+#
+# 确保:
+#   1. 浏览器以 --remote-debugging-port 参数启动
+#   2. 防火墙允许该端口访问
+#   3. browser_host 填写正确的 IP 地址
+# ============================================================
