@@ -33,7 +33,7 @@ Info-Spider is a modular web scraping framework built with **Python** and **Play
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/info-spider.git
+git clone https://github.com/b1babo/info-spider.git
 cd info-spider
 
 # Install dependencies (requires Python 3.13+)
@@ -253,9 +253,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 This tool is for educational and research purposes only. Please respect the terms of service of the platforms you are scraping.
 
-## 📧 Contact
 
-Your Name - [@yourhandle](https://twitter.com/yourhandle)
 
 ## 🙏 Acknowledgments
 
