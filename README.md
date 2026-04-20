@@ -22,7 +22,7 @@ Info-Spider is a modular web scraping framework built with **Python** and **Play
 
 ## ✨ Features
 
-- **Actor-Based Architecture** - Modular, extensible actor system for each platform
+- **Modular Design** - Each platform is independently encapsulated; adding new platforms only requires creating a new handler class
 - **Server-Client Model** - Long-running server keeps browser connections alive
 - **Remote Browser Support** - Connect to browsers on remote machines (Windows/Linux)
 - **REST API** - Control actors via HTTP API
