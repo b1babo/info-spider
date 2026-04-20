@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**一个灵活的、基于 Actor 架构的社交媒体平台爬虫框架**
+**一个灵活的模块化社交媒体平台爬虫框架**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
