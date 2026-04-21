@@ -261,7 +261,48 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 This tool is for educational and research purposes only. Please respect the terms of service of the platforms you are scraping.
 
+## 🆚 Comparison with Browser-Use
 
+| Feature | Info-Spider | Browser-Use |
+|---------|-------------|-------------|
+| **Design Philosophy** | Data scraping framework | AI agent browser automation |
+| **Architecture** | C/S model, persistent server | Agent mode, one-time tasks |
+| **Operation Method** | Predefined Actions | AI autonomous decision-making |
+| **Configuration** | YAML config files | Python code/CLI |
+| **Use Cases** | Continuous data collection | One-time automation tasks |
+| **Data Storage** | Built-in SQLite + JSON | No built-in storage |
+| **Platform Support** | Twitter, Reddit, PH, Trends | Any website |
+| **Learning Curve** | Simple after configuration | Requires understanding Agent concepts |
+| **Cloud Service** | None | Browser Use Cloud |
+
+### Key Differences
+
+**Info-Spider** is a **data scraping tool**:
+- Optimized for specific social platforms
+- Predefined extraction logic
+- Persistent data storage and deduplication
+- Ideal for scheduled collection and data monitoring
+- **Actions constrain the Agent's operation space**, making tasks more targeted
+- **Returns structured data** for easy processing and analysis
+
+**Browser-Use** is an **AI automation assistant**:
+- Universal browser operations
+- AI autonomous planning and execution
+- Suitable for form filling, shopping, task automation
+- Agent is fully autonomous with unrestricted operation space
+- Returns task-dependent results with flexible structure
+
+### When to Choose
+
+**Choose Info-Spider:**
+- Need continuous data collection from Twitter/Reddit
+- Need data deduplication and historical storage
+- Have fixed scraping requirements
+
+**Choose Browser-Use:**
+- Need flexible browser automation
+- Tasks require AI autonomous decision-making
+- One-time tasks (forms, orders, scraping any website)
 
 ## 🙏 Acknowledgments
 
