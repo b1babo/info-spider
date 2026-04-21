@@ -4,7 +4,7 @@
 
 <div align="center">
 
-**A flexible, actor-based web scraping framework for social media platforms**
+**A flexible web scraping framework for social media platforms**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
@@ -24,10 +24,16 @@ Info-Spider is a modular web scraping framework built with **Python** and **Play
 
 ## ✨ Features
 
+- **AI-Native CLI** - Designed for AI agents (Claude, GPT, etc.) to control browsers autonomously
+- **Persistent Browser Sessions** - Maintain logged-in state across multiple automation tasks
 - **Modular Design** - Each platform is independently encapsulated; adding new platforms only requires creating a new handler class
 - **Server-Client Model** - Long-running server keeps browser connections alive
 - **Remote Browser Support** - Connect to browsers on remote machines (Windows/Linux)
 - **REST API** - Control actors via HTTP API
+
+## 🤖 AI-Native Design
+
+Info-Spider is specifically designed as an **AI-controlled automation tool**. Once you log into a platform (Twitter, Reddit, etc.), the AI can continue operating the browser autonomously without re-authentication.
 
 ## 🚀 Quick Start
 
