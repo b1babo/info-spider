@@ -42,6 +42,15 @@ def discover_actors() -> Dict[str, Type[BaseActor]]:
     except Exception as e:
         logger.error(f"加载 TwitterRandomReadingActor 失败: {e}")
 
+    # 手动导入 TwitterArticleActor（使用异步 API）
+    try:
+        from actors.twitter_article import TwitterArticleActor
+        ActorRegistry.register("twitter_article_actor", TwitterArticleActor)
+        actors["twitter_article_actor"] = TwitterArticleActor
+        logger.info("已注册 Actor: twitter_article_actor")
+    except Exception as e:
+        logger.error(f"加载 TwitterArticleActor 失败: {e}")
+
     # 手动导入 RedditCommunityActor（使用异步 API）
     try:
         from actors.reddit_community_actor import RedditCommunityActor
