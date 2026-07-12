@@ -1,5 +1,10 @@
 """
 Product Hunt API Actor - 纯API模式（无需浏览器）
+遵循标准的 create -> extract -> close 模式
+
+create: 初始化（无参数或简单初始化）
+extract: 获取并保存数据（参数：days_back, per_page, topic, max）
+close: 关闭任务
 """
 import logging
 from typing import List, Dict, Any
@@ -15,34 +20,31 @@ logger = logging.getLogger(__name__)
 
 
 class ProductHuntActor(BaseActor):
-    """Product Hunt API Actor - 无需浏览器，纯API调用"""
+    """Product Hunt API Actor - 标准的 create/extract/close 模式"""
 
     actor_name = "product_hunt_actor"
-    actor_description = "Product Hunt API操作Actor（无需浏览器）"
+    actor_description = "Product Hunt API操作Actor（create -> extract -> close 模式）"
 
     def setup_actions(self):
         """注册所有Actions"""
 
         self.register_action(
-            "fetch_posts",
-            self.action_fetch_posts,
-            description="获取产品列表",
-            params_schema={
-                "params": [
-                    {"name": "days_back", "type": "integer", "required": False, "default": 1},
-                    {"name": "per_page", "type": "integer", "required": False, "default": 20},
-                    {"name": "topic", "type": "string", "required": False, "default": ""}
-                ]
-            }
+            "create",
+            self.action_create,
+            description="初始化 Product Hunt 任务",
+            params_schema={"params": []}
         )
 
         self.register_action(
-            "extract_posts",
-            self.action_extract_posts,
-            description="提取已收集的产品",
+            "extract",
+            self.action_extract,
+            description="获取产品数据并保存到数据库",
             params_schema={
                 "params": [
-                    {"name": "max", "type": "integer", "required": False, "default": 100}
+                    {"name": "days_back", "type": "integer", "required": False, "default": 1, "description": "回溯天数"},
+                    {"name": "per_page", "type": "integer", "required": False, "default": 20, "description": "每页数量"},
+                    {"name": "topic", "type": "string", "required": False, "default": "", "description": "主题过滤"},
+                    {"name": "max", "type": "integer", "required": False, "default": 100, "description": "最大处理数量"}
                 ]
             }
         )
@@ -50,14 +52,14 @@ class ProductHuntActor(BaseActor):
         self.register_action(
             "status",
             self.action_status,
-            description="获取状态",
+            description="获取任务状态",
             params_schema={"params": []}
         )
 
         self.register_action(
             "close",
             self.action_close,
-            description="关闭任务",
+            description="关闭任务实例",
             params_schema={"params": []}
         )
 
@@ -65,12 +67,8 @@ class ProductHuntActor(BaseActor):
         self.resources: List[Resource] = []
         self.api_client: ProductHunt = None
 
-    async def action_fetch_posts(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取产品列表"""
-        days_back = action_params.get('days_back', 1)
-        per_page = action_params.get('per_page', 20)
-        topic = action_params.get('topic', "")
-
+    async def action_create(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
+        """初始化任务并验证 API 连通性"""
         api_key = task.profile.params.get("api_key", "")
         if not api_key:
             return {
@@ -78,11 +76,66 @@ class ProductHuntActor(BaseActor):
                 "message": "API key not found in profile params"
             }
 
-        logger.info(f"Fetching Product Hunt posts: days_back={days_back}, per_page={per_page}, topic={topic}")
+        logger.info(f"[create] 初始化 Product Hunt actor")
 
         # 初始化 API 客户端
         if not self.api_client:
             self.api_client = ProductHunt(api_key=api_key)
+
+        # 测试 API 连通性（获取最近 1 个产品）
+        try:
+            logger.info(f"[create] 测试 API 连通性...")
+            today = datetime.now(timezone.utc)
+            test_products = self.api_client.query_posts_data(
+                per_page=1,
+                date_from=today - timedelta(days=1),
+                date_to=today,
+                topic=""
+            )
+
+            if test_products:
+                logger.info(f"[create] API 连通成功，测试获取到 {len(test_products)} 个产品")
+            else:
+                logger.warning(f"[create] API 连通成功但未返回数据")
+
+        except Exception as e:
+            logger.error(f"[create] API 连通性测试失败: {e}")
+            return {
+                "status": "error",
+                "message": f"API connectivity test failed: {str(e)}"
+            }
+
+        # 清空之前收集的数据
+        self.resources = []
+
+        return {
+            "status": "success",
+            "message": "Product Hunt actor initialized",
+            "actor": self.actor_name,
+            "api_connected": True
+        }
+
+    async def action_extract(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
+        """获取产品数据并保存到数据库"""
+        days_back = action_params.get('days_back', 1)
+        per_page = action_params.get('per_page', 20)
+        topic = action_params.get('topic', "")
+        max_items = action_params.get('max', 100)
+
+        logger.info(f"[extract] 获取产品数据: days_back={days_back}, per_page={per_page}, topic={topic}, max={max_items}")
+
+        # 确保客户端已初始化
+        if not self.api_client:
+            api_key = task.profile.params.get("api_key", "")
+            if not api_key:
+                return {
+                    "status": "error",
+                    "message": "API key not found in profile params"
+                }
+            self.api_client = ProductHunt(api_key=api_key)
+
+        # 清空之前收集的数据
+        self.resources = []
 
         # 计算日期范围
         today = datetime.now(timezone.utc)
@@ -97,7 +150,7 @@ class ProductHuntActor(BaseActor):
             topic=topic
         )
 
-        logger.info(f"API returned {len(product_list)} products")
+        logger.info(f"[extract] API 返回 {len(product_list)} 个产品")
 
         # 解析产品数据
         for product in product_list:
@@ -105,11 +158,29 @@ class ProductHuntActor(BaseActor):
             if resource:
                 self.resources.append(resource)
 
-        return {
+        count = min(len(self.resources), max_items)
+
+        result = {
             "status": "success",
-            "fetched": len(product_list),
-            "total_collected": len(self.resources)
+            "total_collected": len(self.resources),
+            "processed": count
         }
+
+        # 保存数据
+        saved_to = None
+        stats = None
+        if self.resources:
+            from core.task_storage import TaskStorage
+            storage = TaskStorage()
+            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
+            stats = storage.merge_to_database(task.task_config.name, self.resources)
+            saved_to = str(raw_file)
+            logger.info(f"[extract] 保存完成: added={stats['added']}, skipped={stats['skipped']}")
+
+        result["saved_to"] = saved_to
+        result["storage_stats"] = stats
+
+        return result
 
     def _parse_product(self, product: dict) -> Resource:
         """解析单个产品数据"""
@@ -180,64 +251,27 @@ class ProductHuntActor(BaseActor):
             )
 
         except Exception as e:
-            logger.error(f"解析产品数据失败: {e}")
+            logger.error(f"[_parse_product] 解析产品数据失败: {e}")
             return None
-
-    async def action_extract_posts(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取已收集的产品"""
-        max_items = action_params.get('max', 100)
-        count = min(len(self.resources), max_items)
-
-        result = {
-            "status": "success",
-            "total_collected": len(self.resources),
-            "returned": count,
-            "posts": []
-        }
-
-        for i, resource in enumerate(self.resources[:count]):
-            result["posts"].append({
-                "id": resource.id,
-                "description": resource.description,
-                "content": resource.resource_content[:200] + "..." if len(resource.resource_content) > 200 else resource.resource_content,
-                "author": resource.resource_author_name,
-                "url": resource.resource_url,
-                "votes": resource.analytics.like_count if resource.analytics else 0,
-                "comments": resource.analytics.reply_count if resource.analytics else 0,
-                "topics": resource.hashtags
-            })
-
-        # 保存数据
-        if self.resources:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            result["saved_to"] = str(raw_file)
-            result["storage_stats"] = stats
-
-        return result
 
     async def action_status(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """获取状态"""
         return {
             "status": "success",
+            "actor": self.actor_name,
             "resources_collected": len(self.resources)
         }
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务"""
-        saved_path = None
-        if self.resources:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            logger.info(f"Data saved: added={stats['added']}, skipped={stats['skipped']}")
-            saved_path = str(raw_file)
+        """关闭任务实例"""
+        logger.info(f"[close] 关闭 Product Hunt actor")
+
+        # 清空资源
+        collected = len(self.resources)
+        self.resources = []
 
         return {
             "status": "success",
-            "resources_collected": len(self.resources),
-            "saved_to": saved_path
+            "message": "Product Hunt actor closed",
+            "resources_collected": collected
         }

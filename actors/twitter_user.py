@@ -109,6 +109,7 @@ class TwitterUserActor(BaseActor):
         self.out_time_max = 5
         self.stop_scroll = False
         self.time_range = 24
+        self._is_closing = False  # 添加关闭标志
 
     # ===== 任务管理Actions =====
 
@@ -192,6 +193,11 @@ class TwitterUserActor(BaseActor):
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """彻底关闭任务并关闭页面"""
+        # 设置关闭标志，停止所有滚动操作
+        self._is_closing = True
+        self.stop_scroll = True
+        logger.info(f"[close] 设置关闭标志，停止所有滚动操作")
+
         # 关闭页面
         try:
             await task.page.close()
@@ -284,6 +290,11 @@ class TwitterUserActor(BaseActor):
 
         # 滚动
         for i in range(scroll_times):
+            # 检查是否正在关闭
+            if self._is_closing:
+                logger.info(f"[推文] 检测到关闭标志，停止滚动")
+                break
+
             if self.stop_scroll:
                 logger.info(f"已获取{time_range}h内的数据，停止滚动")
                 break
@@ -338,12 +349,22 @@ class TwitterUserActor(BaseActor):
 
         # 滚动加载文章列表（拦截器已经在 fetch_articles 中注册）
         for i in range(scroll_times):
+            # 检查是否正在关闭
+            if self._is_closing:
+                logger.info(f"[文章滚动] 检测到关闭标志，停止滚动")
+                break
+
             article_resources = [r for r in self.resources if r.resource_type == "article"]
             if len(article_resources) >= max_items:
                 logger.info(f"[文章滚动] 已达到最大数量 {max_items}，停止滚动")
                 break
             logger.info(f"[文章滚动] 第 {i + 1} 次滚动...")
-            await HumanUtils.smart_scroll(task.page, 1, 3)
+            try:
+                await HumanUtils.smart_scroll(task.page, 1, 3)
+            except Exception as e:
+                logger.error(f"[文章滚动] 滚动失败: {e}")
+                logger.error("[文章滚动] 可能原因: 1) 浏览器连接断开 2) 页面被关闭 3) 远程浏览器不可访问")
+                raise
             await asyncio.sleep(1)  # 等待拦截器处理响应
 
         # 限制最终数量

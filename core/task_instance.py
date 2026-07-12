@@ -85,14 +85,28 @@ class TaskInstance:
             logger.error(traceback.format_exc())
             raise
 
+    def _is_page_accessible(self) -> bool:
+        """检查 page 是否可访问"""
+        if self.page is None:
+            return False
+        try:
+            # 尝试访问 page.url 来检查连接是否有效
+            _ = self.page.url
+            return True
+        except Exception:
+            return False
+
     async def execute_action(self, action_name: str, action_params: Dict[str, Any] = None) -> Dict[str, Any]: # type: ignore
         """执行Action"""
         if self.status == "stopped":
             raise RuntimeError(f"Task instance {self.task_id} is stopped")
 
         # API 模式不需要 page
-        if self.profile.mode == "browser" and self.page is None:
-            raise RuntimeError(f"Task instance {self.task_id} not connected")
+        if self.profile.mode == "browser":
+            if self.page is None:
+                raise RuntimeError(f"Task instance {self.task_id} not connected (page is None)")
+            if not self._is_page_accessible():
+                raise RuntimeError(f"Task instance {self.task_id} page is no longer accessible - browser connection may be lost")
 
         if action_params is None:
             action_params = {}

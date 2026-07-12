@@ -1,5 +1,6 @@
 """
 Google Trends Actor - 通过下载按钮获取CSV数据
+遵循标准的 create -> extract -> close 模式
 """
 import logging
 import json
@@ -19,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleTrendsActor(BaseActor):
-    """Google Trends Actor - 通过下载按钮获取CSV数据"""
+    """Google Trends Actor - 标准模式"""
 
     actor_name = "google_trends_actor"
-    actor_description = "Google Trends趋势分析Actor（下载CSV）"
+    actor_description = "Google Trends趋势分析Actor"
 
     def setup_actions(self):
         """注册所有Actions"""
@@ -31,17 +32,13 @@ class GoogleTrendsActor(BaseActor):
             "create",
             self.action_create,
             description="创建任务（导航到页面）",
-            params_schema={
-                "params": [
-                    {"name": "url", "type": "string", "required": True}
-                ]
-            }
+            params_schema={"params": []}
         )
 
         self.register_action(
             "search_trends",
             self.action_search_trends,
-            description="搜索关键词趋势并下载CSV",
+            description="搜索关键词趋势并保存到数据库",
             params_schema={
                 "params": [
                     {"name": "keyword", "type": "string", "required": True},
@@ -52,12 +49,27 @@ class GoogleTrendsActor(BaseActor):
         )
 
         self.register_action(
-            "extract_trends",
-            self.action_extract_trends,
-            description="提取已收集的趋势数据",
+            "compare_keywords",
+            self.action_compare_keywords,
+            description="比较多个关键词的趋势并保存到数据库",
             params_schema={
                 "params": [
-                    {"name": "max", "type": "integer", "required": False, "default": 100}
+                    {"name": "keywords", "type": "array", "required": True},
+                    {"name": "time_range", "type": "string", "required": False, "default": "today 12-m"},
+                    {"name": "geo", "type": "string", "required": False, "default": ""}
+                ]
+            }
+        )
+
+        self.register_action(
+            "regional_interest",
+            self.action_regional_interest,
+            description="获取关键词的地区分布数据并保存到数据库",
+            params_schema={
+                "params": [
+                    {"name": "keyword", "type": "string", "required": True},
+                    {"name": "geo", "type": "string", "required": False, "default": "US"},
+                    {"name": "time_range", "type": "string", "required": False, "default": "today 12-m"}
                 ]
             }
         )
@@ -72,34 +84,8 @@ class GoogleTrendsActor(BaseActor):
         self.register_action(
             "close",
             self.action_close,
-            description="关闭任务",
+            description="关闭任务实例",
             params_schema={"params": []}
-        )
-
-        self.register_action(
-            "compare_keywords",
-            self.action_compare_keywords,
-            description="比较多个关键词的趋势（最多5个）",
-            params_schema={
-                "params": [
-                    {"name": "keywords", "type": "array", "required": True},
-                    {"name": "time_range", "type": "string", "required": False, "default": "today 12-m"},
-                    {"name": "geo", "type": "string", "required": False, "default": ""}
-                ]
-            }
-        )
-
-        self.register_action(
-            "regional_interest",
-            self.action_regional_interest,
-            description="获取关键词的地区分布数据",
-            params_schema={
-                "params": [
-                    {"name": "keyword", "type": "string", "required": True},
-                    {"name": "geo", "type": "string", "required": False, "default": "US"},
-                    {"name": "time_range", "type": "string", "required": False, "default": "today 12-m"}
-                ]
-            }
         )
 
         # 状态变量
@@ -109,33 +95,34 @@ class GoogleTrendsActor(BaseActor):
 
     async def action_create(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """创建任务 - 导航到 Google Trends 探索页面"""
-        # 始终先进入探索页面，不带任何参数
         url = "https://trends.google.com/explore"
 
         try:
-            logger.info(f"Navigating to Google Trends explore page: {url}")
+            logger.info(f"[create] 导航到 Google Trends: {url}")
             await task.page.goto(url, timeout=60000)
             await asyncio.sleep(3)
 
             title = await task.page.title()
             current_url = task.page.url
 
-            logger.info(f"Page loaded: {title}")
+            logger.info(f"[create] 页面已加载: {title}")
 
             return {
                 "status": "success",
+                "message": "Google Trends actor initialized",
+                "actor": self.actor_name,
                 "url": current_url,
                 "title": title
             }
         except Exception as e:
-            logger.error(f"Create task failed: {e}")
+            logger.error(f"[create] 创建任务失败: {e}")
             return {
                 "status": "error",
                 "message": str(e)
             }
 
     async def action_search_trends(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """搜索关键词趋势 - 通过 URL 直接访问"""
+        """搜索关键词趋势 - 下载并保存数据"""
         keyword = action_params.get('keyword', '')
         time_range = action_params.get('time_range', 'today 12-m')
         geo = action_params.get('geo', '')
@@ -143,32 +130,40 @@ class GoogleTrendsActor(BaseActor):
         if not keyword:
             return {"status": "error", "message": "keyword is required"}
 
-        logger.info(f"Searching trends for: {keyword}")
+        logger.info(f"[search_trends] 搜索趋势: {keyword}")
         self.trend_data = {}
 
         # 创建下载目录（使用任务专属目录）
         download_dir = task.get_data_dir()
         download_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Download directory: {download_dir}")
+        logger.info(f"下载目录: {download_dir}")
 
         try:
-            # 构造搜索 URL 并导航（使用新版 URL）
+            # 构造搜索 URL 并导航
             encoded_keyword = urllib.parse.quote(keyword)
             trends_url = f"https://trends.google.com/explore?q={encoded_keyword}&date={time_range}"
             if geo:
                 trends_url += f"&geo={geo}"
 
-            logger.info(f"Navigating to: {trends_url}")
+            logger.info(f"[search_trends] 导航到: {trends_url}")
             await task.page.goto(trends_url, timeout=60000)
             await asyncio.sleep(5)
 
             # 点击下载按钮获取数据
             result = await self._click_download_button(task, keyword, download_dir)
 
+            # 保存数据到数据库
+            if result.get("status") == "success" and self.resources:
+                saved_to = await self._save_data(task)
+                result["saved_to"] = saved_to
+                # 移除大的数据字段
+                result.pop("posts", None)
+                result.pop("trends", None)
+
             return result
 
         except Exception as e:
-            logger.error(f"Search trends failed: {e}", exc_info=True)
+            logger.error(f"[search_trends] 搜索失败: {e}", exc_info=True)
             return {
                 "status": "error",
                 "message": str(e),
@@ -176,7 +171,7 @@ class GoogleTrendsActor(BaseActor):
             }
 
     async def action_compare_keywords(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """比较多个关键词的趋势"""
+        """比较多个关键词的趋势 - 下载并保存数据"""
         keywords = action_params.get('keywords', [])
         time_range = action_params.get('time_range', 'today 12-m')
         geo = action_params.get('geo', '')
@@ -190,7 +185,7 @@ class GoogleTrendsActor(BaseActor):
         if len(keywords) < 2:
             return {"status": "error", "message": "At least 2 keywords required for comparison"}
 
-        logger.info(f"Comparing keywords: {keywords}")
+        logger.info(f"[compare_keywords] 比较关键词: {keywords}")
         self.trend_data = {}
 
         # 创建下载目录
@@ -204,7 +199,7 @@ class GoogleTrendsActor(BaseActor):
             if geo:
                 compare_url += f"&geo={geo}"
 
-            logger.info(f"Navigating to comparison URL: {compare_url}")
+            logger.info(f"[compare_keywords] 导航到: {compare_url}")
             await task.page.goto(compare_url, timeout=60000)
             await asyncio.sleep(5)
 
@@ -215,10 +210,18 @@ class GoogleTrendsActor(BaseActor):
             result["keywords"] = keywords
             result["comparison_type"] = "multi_keyword"
 
+            # 保存数据到数据库
+            if result.get("status") == "success" and self.resources:
+                saved_to = await self._save_data(task)
+                result["saved_to"] = saved_to
+                # 移除大的数据字段
+                result.pop("posts", None)
+                result.pop("trends", None)
+
             return result
 
         except Exception as e:
-            logger.error(f"Compare keywords failed: {e}", exc_info=True)
+            logger.error(f"[compare_keywords] 比较失败: {e}", exc_info=True)
             return {
                 "status": "error",
                 "message": str(e),
@@ -226,7 +229,7 @@ class GoogleTrendsActor(BaseActor):
             }
 
     async def action_regional_interest(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取关键词的地区分布数据"""
+        """获取关键词的地区分布数据 - 下载并保存"""
         keyword = action_params.get('keyword', '')
         geo = action_params.get('geo', 'US')
         time_range = action_params.get('time_range', 'today 12-m')
@@ -234,7 +237,7 @@ class GoogleTrendsActor(BaseActor):
         if not keyword:
             return {"status": "error", "message": "keyword is required"}
 
-        logger.info(f"Getting regional interest for: {keyword} in {geo}")
+        logger.info(f"[regional_interest] 获取地区分布: {keyword} in {geo}")
         self.trend_data = {}
 
         # 创建下载目录
@@ -246,17 +249,16 @@ class GoogleTrendsActor(BaseActor):
             encoded_keyword = urllib.parse.quote(keyword)
             trends_url = f"https://trends.google.com/explore?geo={geo}&date={time_range}&q={encoded_keyword}"
 
-            logger.info(f"Navigating to: {trends_url}")
+            logger.info(f"[regional_interest] 导航到: {trends_url}")
             await task.page.goto(trends_url, timeout=60000)
             await asyncio.sleep(5)
 
             # 尝试切换到地区分布视图
-            # Google Trends 可能需要点击 "Regional interest" 或相关标签
             try:
                 # 查找地区相关的下载按钮
                 regional_button = await task.page.query_selector('button[aria-label*="regional" i][aria-label*="CSV" i]')
                 if regional_button:
-                    logger.info("Found regional download button")
+                    logger.info("[regional_interest] 找到地区下载按钮")
                     await regional_button.scroll_into_view_if_needed()
                     await asyncio.sleep(1)
 
@@ -285,29 +287,43 @@ class GoogleTrendsActor(BaseActor):
                     with open(str(csv_file), "wb") as f:
                         f.write(content)
 
-                    logger.info(f"Regional data saved: {csv_file}")
+                    logger.info(f"[regional_interest] 地区数据已保存: {csv_file}")
 
                     # 解析地区数据
                     regional_data = self._parse_regional_csv(str(csv_file))
                     self.trend_data["regional"] = regional_data
 
+                    # 构建资源
+                    resource = self._build_trend_resource(keyword, time_range, geo)
+                    if resource:
+                        self.resources.append(resource)
+
+                    # 保存数据
+                    saved_to = await self._save_data(task)
+
                     return {
                         "status": "success",
                         "keyword": keyword,
                         "geo": geo,
-                        "regional_data": regional_data,
-                        "csv_file": str(csv_file)
+                        "csv_file": str(csv_file),
+                        "saved_to": saved_to
                     }
             except Exception as e:
-                logger.warning(f"Regional download button not found or failed: {e}")
+                logger.warning(f"[regional_interest] 地区下载按钮未找到或失败: {e}")
 
             # 如果没有专门的地区下载按钮，返回通用数据
             result = await self._click_download_button(task, keyword, download_dir)
             result["regional_note"] = "Regional-specific data not available, returned general data"
+
+            # 保存数据
+            if result.get("status") == "success" and self.resources:
+                saved_to = await self._save_data(task)
+                result["saved_to"] = saved_to
+
             return result
 
         except Exception as e:
-            logger.error(f"Regional interest failed: {e}", exc_info=True)
+            logger.error(f"[regional_interest] 地区分布获取失败: {e}", exc_info=True)
             return {
                 "status": "error",
                 "message": str(e),
@@ -334,7 +350,7 @@ class GoogleTrendsActor(BaseActor):
             await asyncio.sleep(3)
 
             # 滚动页面以加载所有内容
-            logger.info("Scrolling to load all content...")
+            logger.info("滚动以加载所有内容...")
 
             # 先点击页面主体获取焦点
             try:
@@ -356,20 +372,20 @@ class GoogleTrendsActor(BaseActor):
             await asyncio.sleep(2)
 
             # 调试：打印页面上所有按钮的信息
-            logger.info("Debug: Checking all buttons on page...")
+            logger.info("调试: 检查页面上所有按钮...")
             all_buttons = await task.page.locator("button").all()
-            logger.info(f"Total buttons found: {len(all_buttons)}")
+            logger.info(f"总共找到 {len(all_buttons)} 个按钮")
 
             for i, btn in enumerate(all_buttons[:30]):  # 只看前30个
                 try:
                     aria_label = await btn.get_attribute("aria-label")
                     if aria_label and ("download" in aria_label.lower() or "export" in aria_label.lower() or "csv" in aria_label.lower()):
-                        logger.info(f"  Button {i+1}: aria-label='{aria_label}'")
+                        logger.info(f"  按钮 {i+1}: aria-label='{aria_label}'")
                 except:
                     pass
 
             # 先检查页面上有哪些可用的下载按钮
-            logger.info("Scanning for available download buttons...")
+            logger.info("扫描可用的下载按钮...")
             available_buttons = []
             all_download_buttons = await task.page.locator('button[aria-label*="Download" i][aria-label*="CSV" i]').all()
             for btn in all_download_buttons:
@@ -377,35 +393,35 @@ class GoogleTrendsActor(BaseActor):
                     if await btn.is_visible():
                         aria_label = await btn.get_attribute("aria-label")
                         available_buttons.append(aria_label)
-                        logger.info(f"  Found: {aria_label}")
+                        logger.info(f"  找到: {aria_label}")
                 except:
                     pass
 
             if not available_buttons:
-                logger.warning("No download buttons found on page")
+                logger.warning("页面上没有找到下载按钮")
                 return {
                     "status": "error",
                     "message": "No download buttons found",
                     "keyword": keyword
                 }
 
-            logger.info(f"Total available download buttons: {len(available_buttons)}")
+            logger.info(f"总共可用下载按钮: {len(available_buttons)}")
 
             # 遍历每种下载类型
             for data_type, selector, label in download_types:
-                logger.info(f"Looking for {label} button...")
+                logger.info(f"查找 {label} 按钮...")
 
                 try:
                     # 等待按钮出现（减少超时时间到 3 秒）
                     await task.page.wait_for_selector(selector, state="visible", timeout=3000)
                 except:
-                    logger.debug(f"{label} button not found (timeout)")
+                    logger.debug(f"{label} 按钮未找到（超时）")
                     continue
 
                 # 查找按钮
                 button = await task.page.query_selector(selector)
                 if not button:
-                    logger.warning(f"{label} button query returned None, skipping...")
+                    logger.warning(f"{label} 按钮查询返回 None，跳过...")
                     continue
 
                 try:
@@ -419,7 +435,7 @@ class GoogleTrendsActor(BaseActor):
                     download = await download_info.value
                     suggested_filename = download.suggested_filename
                     download_url = download.url
-                    logger.info(f"[{label}] Download started: {suggested_filename} {download_url}")
+                    logger.info(f"[{label}] 下载开始: {suggested_filename} {download_url}")
                     csv_file = download_dir / suggested_filename
 
 
@@ -443,27 +459,27 @@ class GoogleTrendsActor(BaseActor):
 
 
                     # 保存文件
-                    
+
                     # await download.save_as(str(csv_file))
-                    logger.info(f"[{label}] CSV file saved: {csv_file}")
+                    logger.info(f"[{label}] CSV 文件已保存: {csv_file}")
 
                     downloaded_files[data_type] = str(csv_file)
                     await asyncio.sleep(2)
 
                 except Exception as e:
-                    logger.error(f"[{label}] Failed to download: {e}")
+                    logger.error(f"[{label}] 下载失败: {e}")
                     continue
 
             # 如果没有下载任何文件，进行调试
             if not downloaded_files:
-                logger.warning("No files downloaded, checking available buttons on page...")
+                logger.warning("没有下载任何文件，检查页面上可用按钮...")
                 # 调试：查找所有包含 "Download" 的 aria-label 按钮
                 all_buttons = await task.page.locator('button[aria-label*="Download"]').all()
-                logger.info(f"Found {len(all_buttons)} buttons with 'Download' in aria-label")
+                logger.info(f"找到 {len(all_buttons)} 个 aria-label 中包含 'Download' 的按钮")
                 for i, btn in enumerate(all_buttons[:20]):
                     try:
                         aria_label = await btn.get_attribute("aria-label")
-                        logger.info(f"  Button {i+1}: aria-label='{aria_label}'")
+                        logger.info(f"  按钮 {i+1}: aria-label='{aria_label}'")
                     except:
                         pass
 
@@ -482,24 +498,24 @@ class GoogleTrendsActor(BaseActor):
                         if csv_data:
                             self.trend_data["timeline"] = csv_data
                             total_entries += len(csv_data)
-                            logger.info(f"Parsed {len(csv_data)} timeline entries")
+                            logger.info(f"解析了 {len(csv_data)} 条时间线数据")
                     elif data_type in ("top_queries", "rising_queries"):
                         csv_data = self._parse_queries_csv(csv_path)
                         if csv_data:
                             self.trend_data[data_type] = csv_data
                             total_entries += len(csv_data)
-                            logger.info(f"Parsed {len(csv_data)} {data_type}")
+                            logger.info(f"解析了 {len(csv_data)} 条 {data_type}")
                     elif data_type in ("related_topics", "related_queries"):
                         csv_data = self._parse_queries_csv(csv_path)
                         if csv_data:
                             self.trend_data[data_type] = csv_data
                             total_entries += len(csv_data)
-                            logger.info(f"Parsed {len(csv_data)} {data_type}")
+                            logger.info(f"解析了 {len(csv_data)} 条 {data_type}")
                 except Exception as e:
-                    logger.error(f"Failed to parse {data_type}: {e}")
+                    logger.error(f"解析 {data_type} 失败: {e}")
 
             # 保留下载的 CSV 文件到任务目录
-            logger.info(f"Downloaded CSV files saved to: {download_dir}")
+            logger.info(f"下载的 CSV 文件保存到: {download_dir}")
 
             # 构建资源对象
             resource = self._build_trend_resource(keyword, "today 12-m", "")
@@ -516,7 +532,7 @@ class GoogleTrendsActor(BaseActor):
             }
 
         except Exception as e:
-            logger.error(f"Click download button failed: {e}")
+            logger.error(f"点击下载按钮失败: {e}")
             return {
                 "status": "error",
                 "message": str(e),
@@ -538,7 +554,7 @@ class GoogleTrendsActor(BaseActor):
             # 第4行开始: 数据
 
             if len(lines) < 4:
-                logger.warning(f"CSV file too short: {len(lines)} lines")
+                logger.warning(f"CSV 文件太短: {len(lines)} 行")
                 return []
 
             # 从第3行开始是数据，跳过最后空行
@@ -565,14 +581,14 @@ class GoogleTrendsActor(BaseActor):
                     except ValueError:
                         continue
                     except Exception as e:
-                        logger.debug(f"Error parsing row: {e}")
+                        logger.debug(f"解析行时出错: {e}")
                         continue
 
-            logger.info(f"Parsed {len(timeline_data)} timeline entries from CSV")
+            logger.info(f"从 CSV 解析了 {len(timeline_data)} 条时间线数据")
             return timeline_data
 
         except Exception as e:
-            logger.error(f"Error parsing CSV: {e}", exc_info=True)
+            logger.error(f"解析 CSV 时出错: {e}", exc_info=True)
             return []
 
     def _parse_queries_csv(self, csv_path: str) -> list:
@@ -589,7 +605,7 @@ class GoogleTrendsActor(BaseActor):
             # 第3行开始: 数据
 
             if len(lines) < 3:
-                logger.warning(f"CSV file too short: {len(lines)} lines")
+                logger.warning(f"CSV 文件太短: {len(lines)} 行")
                 return []
 
             # 找到数据起始行（跳过标题行）
@@ -622,14 +638,14 @@ class GoogleTrendsActor(BaseActor):
                             "value": value
                         })
                 except Exception as e:
-                    logger.debug(f"Error parsing row: {e}")
+                    logger.debug(f"解析行时出错: {e}")
                     continue
 
-            logger.info(f"Parsed {len(queries_data)} queries from CSV")
+            logger.info(f"从 CSV 解析了 {len(queries_data)} 条查询数据")
             return queries_data
 
         except Exception as e:
-            logger.error(f"Error parsing queries CSV: {e}", exc_info=True)
+            logger.error(f"解析查询 CSV 时出错: {e}", exc_info=True)
             return []
 
     def _parse_regional_csv(self, csv_path: str) -> dict:
@@ -645,7 +661,7 @@ class GoogleTrendsActor(BaseActor):
                 lines = [line for line in csv.reader(f)]
 
             if len(lines) < 3:
-                logger.warning(f"Regional CSV file too short: {len(lines)} lines")
+                logger.warning(f"地区 CSV 文件太短: {len(lines)} 行")
                 return regional_data
 
             # 跳过标题行，解析数据
@@ -676,18 +692,18 @@ class GoogleTrendsActor(BaseActor):
                         "value": value
                     })
                 except Exception as e:
-                    logger.debug(f"Error parsing regional row: {e}")
+                    logger.debug(f"解析地区行时出错: {e}")
                     continue
 
             # 按值排序
             for key in regional_data:
                 regional_data[key].sort(key=lambda x: x["value"], reverse=True)
 
-            logger.info(f"Parsed regional data: {len(regional_data['country'])} regions")
+            logger.info(f"解析地区数据: {len(regional_data['country'])} 个地区")
             return regional_data
 
         except Exception as e:
-            logger.error(f"Error parsing regional CSV: {e}", exc_info=True)
+            logger.error(f"解析地区 CSV 时出错: {e}", exc_info=True)
             return regional_data
 
     def _build_trend_resource(self, keyword: str, time_range: str, geo: str) -> Resource:
@@ -791,63 +807,52 @@ class GoogleTrendsActor(BaseActor):
         """格式化相关查询（保留用于向后兼容）"""
         return self._format_queries(queries)
 
-    async def action_extract_trends(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取已收集的趋势数据"""
-        max_items = action_params.get('max', 100)
-        count = min(len(self.resources), max_items)
+    async def _save_data(self, task) -> str:
+        """保存收集的数据"""
+        if not self.resources:
+            logger.warning(f"[_save_data] 没有资源可保存")
+            return None
 
-        result = {
-            "status": "success",
-            "total_collected": len(self.resources),
-            "returned": count,
-            "trends": []
-        }
-
-        for i, resource in enumerate(self.resources[:count]):
-            result["trends"].append({
-                "id": resource.id,
-                "keyword": resource.description.split(": ")[-1] if resource.description else "",
-                "content": resource.resource_content[:300],
-                "url": resource.resource_url,
-                "avg_interest": resource.analytics.view_count if resource.analytics else 0,
-                "peak_interest": resource.analytics.like_count if resource.analytics else 0,
-                "related_topics": resource.hashtags
-            })
-
-        # 保存数据
-        if self.resources:
+        try:
             from core.task_storage import TaskStorage
             storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            result["saved_to"] = str(raw_file)
-            result["storage_stats"] = stats
 
-        return result
+            # 1. 保存原始JSON
+            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
+
+            # 2. 合并到数据库
+            stats = storage.merge_to_database(task.task_config.name, self.resources)
+
+            logger.info(
+                f"[_save_data] 数据已保存: "
+                f"raw={raw_file.name}, "
+                f"added={stats['added']}, "
+                f"skipped={stats['skipped']}"
+            )
+
+            return str(raw_file)
+        except Exception as e:
+            logger.error(f"[_save_data] 保存数据时出错: {e}")
+            return None
 
     async def action_status(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """获取状态"""
         return {
             "status": "success",
+            "actor": self.actor_name,
             "resources_collected": len(self.resources)
         }
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务"""
-        saved_path = None
-        if self.resources:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            logger.info(f"Data saved: added={stats['added']}, skipped={stats['skipped']}")
-            saved_path = str(raw_file)
+        """关闭任务实例"""
+        logger.info(f"[close] 关闭 Google Trends actor")
 
-        # 保留下载的 CSV 文件
-        logger.info(f"CSV files preserved in task directories under data/tasks/")
+        # 清空资源
+        collected = len(self.resources)
+        self.resources = []
 
         return {
             "status": "success",
-            "resources_collected": len(self.resources),
-            "saved_to": saved_path
+            "message": "Google Trends actor closed",
+            "resources_collected": collected
         }

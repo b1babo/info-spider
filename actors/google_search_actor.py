@@ -7,6 +7,8 @@ Google Search Actor - Google 搜索结果抓取
 - 相关搜索（People also search for）
 - People also ask
 - Find related products & services
+
+遵循标准的 create -> extract -> close 模式
 """
 import logging
 import asyncio
@@ -125,23 +127,10 @@ class GoogleSearchActor(BaseActor):
         self.register_action(
             "create",
             self.action_create,
-            description="创建搜索任务",
+            description="初始化任务并导航到搜索页面",
             params_schema={
                 "params": [
-                    {"name": "query", "type": "string", "required": True, "description": "搜索关键词"},
-                    {"name": "language", "type": "string", "required": False, "default": "en", "description": "语言代码"},
-                    {"name": "num", "type": "integer", "required": False, "default": 10, "description": "每页结果数"}
-                ]
-            }
-        )
-
-        self.register_action(
-            "extract_results",
-            self.action_extract_results,
-            description="提取当前页面的搜索结果",
-            params_schema={
-                "params": [
-                    {"name": "max", "type": "integer", "required": False, "default": 100, "description": "最大提取数量"}
+                    {"name": "url", "type": "string", "required": True, "description": "Google 搜索 URL"}
                 ]
             }
         )
@@ -149,7 +138,7 @@ class GoogleSearchActor(BaseActor):
         self.register_action(
             "scroll_and_extract",
             self.action_scroll_and_extract,
-            description="滚动页面并提取搜索结果",
+            description="滚动页面并提取搜索结果并保存到数据库",
             params_schema={
                 "params": [
                     {"name": "scroll_times", "type": "integer", "required": False, "default": 10},
@@ -168,7 +157,7 @@ class GoogleSearchActor(BaseActor):
         self.register_action(
             "close",
             self.action_close,
-            description="关闭任务并保存",
+            description="关闭任务实例",
             params_schema={"params": []}
         )
 
@@ -181,106 +170,47 @@ class GoogleSearchActor(BaseActor):
         self.current_query = ""
         self.current_url = ""
 
-    def _build_search_url(self, query: str, language: str = "en", num: int = 10) -> str:
-        """构建搜索 URL"""
-        params = {
-            "q": query,
-            "hl": language,
-            "num": num
-        }
-        return f"{self.SEARCH_URL}?{urlencode(params)}"
-
     def _generate_result_id(self, url: str) -> str:
         """生成结果 ID"""
         url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:12]
         return f"gs_{url_hash}"
 
     async def action_create(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """创建搜索任务"""
-        query = action_params.get("query", "")
-        language = action_params.get("language", "en")
-        num = action_params.get("num", 10)
+        """初始化任务并导航到搜索页面"""
+        url = action_params.get("url", "")
 
-        if not query:
-            return {"status": "error", "message": "query is required"}
+        if not url:
+            return {"status": "error", "message": "url is required"}
 
-        self.current_query = query
-        search_url = self._build_search_url(query, language, num)
-        self.current_url = search_url
+        self.current_url = url
 
-        logger.info(f"Searching: {query}")
-        logger.info(f"URL: {search_url}")
+        # 从 URL 中提取查询参数
+        try:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            self.current_query = params.get("q", [""])[0]
+        except:
+            self.current_query = ""
 
-        await task.page.goto(search_url, timeout=60000)
+        logger.info(f"[create] 导航到: {url}")
+        logger.info(f"[create] 查询: {self.current_query}")
+
+        await task.page.goto(url, timeout=60000)
         await asyncio.sleep(2)
 
         return {
             "status": "success",
-            "query": query,
+            "message": "Google Search actor initialized",
+            "actor": self.actor_name,
             "url": task.page.url,
-            "title": await task.page.title()
+            "title": await task.page.title(),
+            "query": self.current_query
         }
-
-    async def action_extract_results(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取当前页面的搜索结果"""
-        max_items = action_params.get("max", 100)
-
-        try:
-            # 模拟人类滚动：先滚动到底部，再滚动回顶部
-            await self._scroll_page(task)
-
-            # 提取网页搜索结果
-            results = await self._parse_search_results(task, max_items)
-
-            for result in results:
-                if result.url not in self.processed_urls:
-                    self.results.append(result)
-                    self.processed_urls.add(result.url)
-
-            # 提取相关搜索（People also search for）
-            related = await self._parse_related_searches(task)
-            for item in related:
-                if item.query not in {r.query for r in self.related_searches}:
-                    self.related_searches.append(item)
-
-            # 提取 People also ask
-            paa = await self._parse_people_also_ask(task)
-            for item in paa:
-                if item.question not in {q.question for q in self.people_also_ask}:
-                    self.people_also_ask.append(item)
-
-            # 提取 Find related products
-            logger.info("Starting to parse related products...")
-            products = await self._parse_related_products(task)
-            logger.info(f"Parsed {len(products)} related products")
-            for item in products:
-                if item.query not in {p.query for p in self.related_products}:
-                    self.related_products.append(item)
-
-            return {
-                "status": "success",
-                "extracted": len(results),
-                "total_collected": len(self.results),
-                "related_searches": len(self.related_searches),
-                "people_also_ask": len(self.people_also_ask),
-                "related_products": len(self.related_products),
-                "results": [r.to_dict() for r in results],
-                "related": [r.to_dict() for r in related],
-                "paa": [p.to_dict() for p in paa],
-                "products": [p.to_dict() for p in products]
-            }
-
-        except Exception as e:
-            logger.error(f"Extract results failed: {e}")
-            return {
-                "status": "error",
-                "message": str(e)
-            }
 
     async def _scroll_page(self, task):
         """模拟人类滚动页面：滚动到底部再回到顶部"""
         try:
-            logger.info("Scrolling to bottom...")
+            logger.info("[_scroll_page] 滚动到底部...")
 
             # 分段滚动到底部，模拟人类行为
             for i in range(5):
@@ -290,7 +220,7 @@ class GoogleSearchActor(BaseActor):
             # 等待底部加载
             await asyncio.sleep(1)
 
-            logger.info("Scrolling to top...")
+            logger.info("[_scroll_page] 滚动回顶部...")
 
             # 滚动回顶部
             await task.page.evaluate("window.scrollTo(0, 0)")
@@ -299,7 +229,7 @@ class GoogleSearchActor(BaseActor):
             await asyncio.sleep(1)
 
         except Exception as e:
-            logger.debug(f"Scroll page error: {e}")
+            logger.debug(f"[_scroll_page] 滚动页面错误: {e}")
 
     async def _parse_search_results(self, task, max_items: int) -> List[GoogleSearchResult]:
         """解析搜索结果页面
@@ -319,10 +249,10 @@ class GoogleSearchActor(BaseActor):
             result_blocks = await task.page.locator("#search div[data-rpos] > div[data-hveid]").all()
 
             if not result_blocks:
-                logger.warning("No result blocks found with selector: div[data-rpos] > div[data-hveid]")
+                logger.warning("[_parse_search_results] 未找到结果块")
                 return results
 
-            logger.info(f"Found {len(result_blocks)} result blocks")
+            logger.info(f"[_parse_search_results] 找到 {len(result_blocks)} 个结果块")
 
             for idx, block in enumerate(result_blocks):
                 if len(results) >= max_items:
@@ -341,14 +271,14 @@ class GoogleSearchActor(BaseActor):
                             results.append(result)
                             logger.info(f"  [{len(results)}] {result.title[:50]}...")
                         else:
-                            logger.debug(f"  Skipped: {result.url}")
+                            logger.debug(f"  跳过: {result.url}")
 
                 except Exception as e:
-                    logger.debug(f"Failed to parse result block {idx}: {e}")
+                    logger.debug(f"[_parse_search_results] 解析结果块 {idx} 失败: {e}")
                     continue
 
         except Exception as e:
-            logger.error(f"Parse search results error: {e}")
+            logger.error(f"[_parse_search_results] 解析错误: {e}")
 
         return results
 
@@ -408,7 +338,7 @@ class GoogleSearchActor(BaseActor):
             )
 
         except Exception as e:
-            logger.debug(f"Parse standard result block error: {e}")
+            logger.debug(f"[_parse_result_block] 解析标准结果块错误: {e}")
             return None
 
     async def _parse_rich_media_block(self, block, rank: int) -> Optional[GoogleSearchResult]:
@@ -460,7 +390,7 @@ class GoogleSearchActor(BaseActor):
             )
 
         except Exception as e:
-            logger.debug(f"Parse rich media result block error: {e}")
+            logger.debug(f"[_parse_rich_media_block] 解析富媒体结果块错误: {e}")
             return None
 
     def _clean_google_url(self, url: str) -> str:
@@ -495,29 +425,24 @@ class GoogleSearchActor(BaseActor):
         return bool(url)
 
     async def _parse_related_searches(self, task) -> List[RelatedSearch]:
-        """解析相关搜索（People also search for）
-
-        结构：
-        - #botstuff #bres - 容器
-        - href 格式: /search?sca_esv=...&q=... (q 参数在中间)
-        """
+        """解析相关搜索（People also search for）"""
         results = []
 
         try:
             # 先检查 #bres 是否存在（相关搜索区域）
             bres = await task.page.query_selector("#botstuff #bres")
             if not bres:
-                logger.debug("No #bres found (related searches container)")
+                logger.debug("[_parse_related_searches] 未找到 #bres")
                 return results
 
             # 在 #bres 中查找搜索链接：包含 /search 且包含 q= 参数
             links = await task.page.locator("#botstuff #bres a[href*='/search'][href*='q=']").all()
 
             if not links:
-                logger.debug("No related search links found in #bres")
+                logger.debug("[_parse_related_searches] 未找到相关搜索链接")
                 return results
 
-            logger.info(f"Found {len(links)} related search links in #bres")
+            logger.info(f"[_parse_related_searches] 找到 {len(links)} 个相关搜索链接")
 
             for idx, link in enumerate(links):
                 try:
@@ -549,54 +474,38 @@ class GoogleSearchActor(BaseActor):
                         rank=idx + 1
                     ))
 
-                    logger.info(f"  Related[{idx + 1}]: {query}")
+                    logger.info(f"  相关搜索[{idx + 1}]: {query}")
 
                 except Exception as e:
-                    logger.debug(f"Failed to parse related search {idx}: {e}")
+                    logger.debug(f"[_parse_related_searches] 解析相关搜索 {idx} 失败: {e}")
                     continue
 
         except Exception as e:
-            logger.info(f"Parse related searches error: {e}")
+            logger.info(f"[_parse_related_searches] 错误: {e}")
 
         return results
 
     def _extract_query_from_href(self, href: str) -> str:
-        """从 href 中提取查询参数
-
-        href 格式可能是：
-        - /search?q=keyword
-        - /search?sca_esv=...&q=keyword
-        """
+        """从 href 中提取查询参数"""
         try:
-            # 直接解析 q 参数（不依赖 urlparse，因为可能是相对路径）
             if "q=" in href:
-                # 找到 q= 的位置
                 q_index = href.find("q=")
-                # 从 q= 开始提取
                 remaining = href[q_index + 2:]
-                # 找到下一个 & 或字符串结束
                 end_index = remaining.find("&")
                 if end_index == -1:
                     query = remaining
                 else:
                     query = remaining[:end_index]
 
-                # URL 解码
                 from urllib.parse import unquote
                 decoded = unquote(query)
-                # 将 + 替换为空格
                 return decoded.replace("+", " ")
         except Exception as e:
-            logger.debug(f"Extract query from href error: {e}")
+            logger.debug(f"[_extract_query_from_href] 错误: {e}")
         return ""
 
     async def _parse_people_also_ask(self, task) -> List[PeopleAlsoAsk]:
-        """解析 People also ask
-
-        结构：
-        - div.related-question-pair[data-q] - 每个问题
-        - data-q 属性包含问题文本
-        """
+        """解析 People also ask"""
         results = []
 
         try:
@@ -604,10 +513,10 @@ class GoogleSearchActor(BaseActor):
             questions = await task.page.locator("div.related-question-pair[data-q]").all()
 
             if not questions:
-                logger.debug("No People also ask questions found")
+                logger.debug("[_parse_people_also_ask] 未找到 PAA 问题")
                 return results
 
-            logger.info(f"Found {len(questions)} People also ask questions")
+            logger.info(f"[_parse_people_also_ask] 找到 {len(questions)} 个 PAA 问题")
 
             for idx, q_div in enumerate(questions):
                 try:
@@ -624,31 +533,22 @@ class GoogleSearchActor(BaseActor):
                     logger.info(f"  PAA[{idx + 1}]: {question}")
 
                 except Exception as e:
-                    logger.debug(f"Failed to parse PAA question {idx}: {e}")
+                    logger.debug(f"[_parse_people_also_ask] 解析 PAA 问题 {idx} 失败: {e}")
                     continue
 
         except Exception as e:
-            logger.debug(f"Parse People also ask error: {e}")
+            logger.debug(f"[_parse_people_also_ask] 错误: {e}")
 
         return results
 
     async def _parse_related_products(self, task) -> List[RelatedProduct]:
-        """解析 Find related products & services
-
-        稳定特征（Google UI 文本）：
-        说明文字: "These searches help you find relevant offers from advertisers"
-
-        策略：
-        1. 找到 disclaimer 元素
-        2. 获取其上一个兄弟元素（包含链接的列表）
-        3. 提取其中所有 a[href]
-        """
+        """解析 Find related products & services"""
         results = []
 
         try:
-            logger.info("[_parse_related_products] Starting...")
+            logger.info("[_parse_related_products] 开始...")
 
-            # 1. 找到 disclaimer 元素（使用文本匹配）
+            # 找到 disclaimer 元素
             disclaimer_patterns = [
                 "These searches help you find relevant offers from advertisers",
                 "These search suggestions help you find relevant offers from advertisers"
@@ -659,33 +559,25 @@ class GoogleSearchActor(BaseActor):
                 try:
                     locator = task.page.locator('text=' + pattern).first
                     count = await locator.count()
-                    logger.info(f"[_parse_related_products] Pattern '{pattern[:40]}...': count={count}")
                     if count > 0:
                         disclaimer_element = locator
-                        logger.info(f"[_parse_related_products] Found disclaimer with pattern: {pattern[:50]}...")
+                        logger.info(f"[_parse_related_products] 找到免责声明")
                         break
                 except Exception as e:
-                    logger.info(f"[_parse_related_products] Error checking pattern: {e}")
                     continue
 
             if not disclaimer_element:
-                logger.debug("[_parse_related_products] No disclaimer found for related products")
+                logger.debug("[_parse_related_products] 未找到相关产品免责声明")
                 return results
 
-            # 2. 使用纯 JavaScript 提取链接数据
-            # 直接在浏览器中执行 JavaScript 来获取上一个兄弟元素中的链接
-            logger.info("[_parse_related_products] Extracting links with JavaScript...")
-
+            # 使用 JavaScript 提取链接
             links_data = await disclaimer_element.evaluate("""el => {
-                // 获取父元素
                 const parent = el.parentElement;
                 if (!parent) return [];
 
-                // 获取上一个兄弟元素
                 const prevSibling = parent.previousElementSibling;
                 if (!prevSibling) return [];
 
-                // 查找所有链接
                 const links = Array.from(prevSibling.querySelectorAll('a[href]'));
                 return links.map(a => ({
                     href: a.href,
@@ -693,13 +585,13 @@ class GoogleSearchActor(BaseActor):
                 }));
             }""")
 
-            logger.info(f"[_parse_related_products] Found {len(links_data)} links with JavaScript")
+            logger.info(f"[_parse_related_products] 用 JavaScript 找到 {len(links_data)} 个链接")
 
             if not links_data:
-                logger.debug("[_parse_related_products] No links found in related products container")
+                logger.debug("[_parse_related_products] 未找到相关产品链接")
                 return results
 
-            # 3. 处理提取的链接数据
+            # 处理提取的链接数据
             for idx, link_data in enumerate(links_data):
                 try:
                     href = link_data.get('href')
@@ -727,51 +619,16 @@ class GoogleSearchActor(BaseActor):
                         url=url
                     ))
 
-                    logger.info(f"  RelatedProduct[{idx + 1}]: {query}")
+                    logger.info(f"  相关产品[{idx + 1}]: {query}")
 
                 except Exception as e:
-                    logger.debug(f"Failed to parse link {idx}: {e}")
+                    logger.debug(f"[_parse_related_products] 解析链接 {idx} 失败: {e}")
                     continue
 
         except Exception as e:
-            logger.info(f"Parse related products error: {e}")
+            logger.info(f"[_parse_related_products] 错误: {e}")
 
         return results
-
-    async def action_scroll_and_extract(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """滚动页面并提取结果"""
-        scroll_times = action_params.get("scroll_times", 10)
-        max_items = action_params.get("max", 100)
-
-        logger.info(f"Scroll and extract: scroll_times={scroll_times}, max={max_items}")
-
-        for i in range(scroll_times):
-            if len(self.results) >= max_items:
-                logger.info(f"Reached max items {max_items}, stopping")
-                break
-
-            logger.info(f"Scroll {i + 1}/{scroll_times}")
-
-            # 提取当前可见的结果
-            await self.action_extract_results(task, {"max": max_items})
-
-            # 滚动到底部
-            await task.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(2)
-
-            # 尝试点击 "Show more results" 按钮
-            if await task.page.locator("input[value='Show more results']").count() > 0:
-                try:
-                    await task.page.locator("input[value='Show more results']").first.click()
-                    await asyncio.sleep(2)
-                except:
-                    pass
-
-        return {
-            "status": "success",
-            "total_collected": len(self.results),
-            "results": [r.to_dict() for r in self.results]
-        }
 
     def _results_to_resources(self) -> List[Resource]:
         """将搜索结果转换为 Resource 对象"""
@@ -786,7 +643,7 @@ class GoogleSearchActor(BaseActor):
                 resource_content=result.snippet,
                 description=result.title,
                 resource_platform="Google Search",
-                resource_platform_url=self.current_url,  # 使用搜索 URL
+                resource_platform_url=self.current_url,
                 resource_author_name="",
                 resource_author_display_name="",
                 resource_author_url="",
@@ -796,14 +653,12 @@ class GoogleSearchActor(BaseActor):
                     reply_count=0
                 )
             )
-            # 将 rank 存储在 urls 字段中
             resource.urls = [{"type": "search_result", "rank": result.rank, "display_url": result.display_url}]
             resources.append(resource)
 
         # 相关搜索结果
         for related in self.related_searches:
-            # 生成相关搜索的搜索 URL
-            from urllib.parse import urlencode, quote
+            from urllib.parse import urlencode
             search_url = f"{self.SEARCH_URL}?{urlencode({'q': related.query})}"
 
             resource = Resource(
@@ -828,7 +683,6 @@ class GoogleSearchActor(BaseActor):
 
         # People also ask 结果
         for paa in self.people_also_ask:
-            # 生成搜索 URL（将问题作为搜索词）
             from urllib.parse import urlencode
             search_url = f"{self.SEARCH_URL}?{urlencode({'q': paa.question})}"
 
@@ -876,24 +730,75 @@ class GoogleSearchActor(BaseActor):
 
         return resources
 
-    async def action_status(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取状态"""
-        return {
-            "status": "success",
-            "query": self.current_query,
-            "results_collected": len(self.results),
-            "related_searches": len(self.related_searches),
-            "people_also_ask": len(self.people_also_ask),
-            "related_products": len(self.related_products),
-            "processed_urls": len(self.processed_urls)
-        }
+    async def action_scroll_and_extract(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
+        """滚动页面并提取结果并保存到数据库"""
+        scroll_times = action_params.get("scroll_times", 10)
+        max_items = action_params.get("max", 100)
 
-    async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务并保存"""
-        saved_path = None
-        stats = {"total": 0, "added": 0, "skipped": 0}
+        logger.info(f"[scroll_and_extract] 滚动次数={scroll_times}, 最大={max_items}")
 
-        if self.results:
+        # 清空之前的数据
+        self.results = []
+        self.related_searches = []
+        self.people_also_ask = []
+        self.related_products = []
+        self.processed_urls = set()
+
+        for i in range(scroll_times):
+            if len(self.results) >= max_items:
+                logger.info(f"[scroll_and_extract] 已达到最大数量 {max_items}，停止")
+                break
+
+            logger.info(f"[scroll_and_extract] 第 {i + 1}/{scroll_times} 次滚动")
+
+            # 模拟人类滚动
+            await self._scroll_page(task)
+
+            # 提取当前可见的结果
+            results = await self._parse_search_results(task, max_items)
+            for result in results:
+                if result.url not in self.processed_urls:
+                    self.results.append(result)
+                    self.processed_urls.add(result.url)
+
+            # 提取相关搜索
+            if i == 0:  # 只在第一次提取
+                related = await self._parse_related_searches(task)
+                for item in related:
+                    if item.query not in {r.query for r in self.related_searches}:
+                        self.related_searches.append(item)
+
+                # 提取 People also ask
+                paa = await self._parse_people_also_ask(task)
+                for item in paa:
+                    if item.question not in {q.question for q in self.people_also_ask}:
+                        self.people_also_ask.append(item)
+
+                # 提取 Find related products
+                products = await self._parse_related_products(task)
+                for item in products:
+                    if item.query not in {p.query for p in self.related_products}:
+                        self.related_products.append(item)
+
+            # 滚动到底部
+            await task.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(2)
+
+            # 尝试点击 "Show more results" 按钮
+            if await task.page.locator("input[value='Show more results']").count() > 0:
+                try:
+                    await task.page.locator("input[value='Show more results']").first.click()
+                    await asyncio.sleep(2)
+                except:
+                    pass
+
+        logger.info(f"[scroll_and_extract] 提取完成: 结果={len(self.results)}, 相关={len(self.related_searches)}, PAA={len(self.people_also_ask)}, 产品={len(self.related_products)}")
+
+        # 保存数据到数据库
+        saved_to = None
+        stats = None
+
+        if self.results or self.related_searches or self.people_also_ask or self.related_products:
             from core.task_storage import TaskStorage
             storage = TaskStorage()
 
@@ -904,14 +809,43 @@ class GoogleSearchActor(BaseActor):
 
             # 合并到数据库
             stats = storage.merge_to_database(task.task_config.name, resources)
-            saved_path = str(raw_file)
-            logger.info(f"Results saved: added={stats['added']}, skipped={stats['skipped']}")
+            saved_to = str(raw_file)
+            logger.info(f"[scroll_and_extract] 保存完成: added={stats['added']}, skipped={stats['skipped']}")
 
-        # 清理状态
+        return {
+            "status": "success",
+            "query": self.current_query,
+            "total_collected": len(self.results),
+            "related_searches": len(self.related_searches),
+            "people_also_ask": len(self.people_also_ask),
+            "related_products": len(self.related_products),
+            "saved_to": saved_to,
+            "storage_stats": stats
+        }
+
+    async def action_status(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
+        """获取状态"""
+        return {
+            "status": "success",
+            "actor": self.actor_name,
+            "query": self.current_query,
+            "results_collected": len(self.results),
+            "related_searches": len(self.related_searches),
+            "people_also_ask": len(self.people_also_ask),
+            "related_products": len(self.related_products),
+            "processed_urls": len(self.processed_urls)
+        }
+
+    async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
+        """关闭任务实例"""
+        logger.info(f"[close] 关闭 Google Search actor")
+
+        # 清空资源
         results_count = len(self.results)
         related_count = len(self.related_searches)
         paa_count = len(self.people_also_ask)
         products_count = len(self.related_products)
+
         self.results = []
         self.related_searches = []
         self.people_also_ask = []
@@ -921,10 +855,9 @@ class GoogleSearchActor(BaseActor):
 
         return {
             "status": "success",
-            "results_saved": results_count,
-            "related_searches_saved": related_count,
-            "people_also_ask_saved": paa_count,
-            "related_products_saved": products_count,
-            "saved_to": saved_path,
-            "storage_stats": stats
+            "message": "Google Search actor closed",
+            "results_collected": results_count,
+            "related_searches": related_count,
+            "people_also_ask": paa_count,
+            "related_products": products_count
         }

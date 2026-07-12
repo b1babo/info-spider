@@ -5,12 +5,14 @@ Bing Search Actor - Bing 搜索结果抓取
 - 网页列表（URL、标题、摘要）
 - 相关搜索
 - 人们也在问
+
+遵循标准的 create -> extract -> close 模式
 """
 import logging
 import asyncio
 import hashlib
 from typing import List, Dict, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs
 
 from core.base_actor import BaseActor
 from core.models import Resource, Author, Analytics
@@ -99,23 +101,10 @@ class BingSearchActor(BaseActor):
         self.register_action(
             "create",
             self.action_create,
-            description="创建搜索任务",
+            description="初始化任务并导航到搜索页面",
             params_schema={
                 "params": [
-                    {"name": "query", "type": "string", "required": True, "description": "搜索关键词"},
-                    {"name": "language", "type": "string", "required": False, "default": "en-us", "description": "语言代码"},
-                    {"name": "count", "type": "integer", "required": False, "default": 10, "description": "每页结果数"}
-                ]
-            }
-        )
-
-        self.register_action(
-            "extract_results",
-            self.action_extract_results,
-            description="提取当前页面的搜索结果",
-            params_schema={
-                "params": [
-                    {"name": "max", "type": "integer", "required": False, "default": 100, "description": "最大提取数量"}
+                    {"name": "url", "type": "string", "required": True, "description": "Bing 搜索 URL"}
                 ]
             }
         )
@@ -123,7 +112,7 @@ class BingSearchActor(BaseActor):
         self.register_action(
             "scroll_and_extract",
             self.action_scroll_and_extract,
-            description="滚动页面并提取搜索结果",
+            description="滚动页面并提取搜索结果并保存到数据库",
             params_schema={
                 "params": [
                     {"name": "scroll_times", "type": "integer", "required": False, "default": 10},
@@ -142,7 +131,7 @@ class BingSearchActor(BaseActor):
         self.register_action(
             "close",
             self.action_close,
-            description="关闭任务并保存",
+            description="关闭任务实例",
             params_schema={"params": []}
         )
 
@@ -154,132 +143,124 @@ class BingSearchActor(BaseActor):
         self.current_query = ""
         self.current_url = ""
 
-    def _build_search_url(self, query: str, language: str = "en-us", count: int = 10) -> str:
-        """构建搜索 URL"""
-        params = {
-            "q": query,
-            "setlang": language,
-            "count": count
-        }
-        return f"{self.SEARCH_URL}?{urlencode(params)}"
-
     def _generate_result_id(self, url: str) -> str:
         """生成结果 ID"""
         url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()[:12]
         return f"bs_{url_hash}"
 
     async def action_create(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """创建搜索任务"""
-        query = action_params.get("query", "")
-        language = action_params.get("language", "en-us")
-        count = action_params.get("count", 10)
+        """初始化任务并导航到搜索页面"""
+        url = action_params.get("url", "")
 
-        if not query:
-            return {"status": "error", "message": "query is required"}
+        if not url:
+            return {"status": "error", "message": "url is required"}
 
-        self.current_query = query
-        search_url = self._build_search_url(query, language, count)
-        self.current_url = search_url
+        self.current_url = url
 
-        logger.info(f"Searching Bing: {query}")
-        logger.info(f"URL: {search_url}")
+        # 从 URL 中提取查询参数
+        try:
+            parsed = urlparse(url)
+            params = parse_qs(parsed.query)
+            self.current_query = params.get("q", [""])[0]
+        except:
+            self.current_query = ""
 
-        await task.page.goto(search_url, timeout=60000)
+        logger.info(f"[create] 导航到: {url}")
+        logger.info(f"[create] 查询: {self.current_query}")
+
+        await task.page.goto(url, timeout=60000)
         await asyncio.sleep(2)
 
         return {
             "status": "success",
-            "query": query,
+            "message": "Bing Search actor initialized",
+            "actor": self.actor_name,
             "url": task.page.url,
-            "title": await task.page.title()
+            "title": await task.page.title(),
+            "query": self.current_query
         }
 
-    async def action_extract_results(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取当前页面的搜索结果"""
-        max_items = action_params.get("max", 100)
-
-        try:
-            # 模拟人类滚动
-            await self._scroll_page(task)
-
-            # 提取网页搜索结果
-            results = await self._parse_search_results(task, max_items)
-
-            for result in results:
-                if result.url not in self.processed_urls:
-                    self.results.append(result)
-                    self.processed_urls.add(result.url)
-
-            # 提取相关搜索
-            related = await self._parse_related_searches(task)
-            for item in related:
-                if item.query not in {r.query for r in self.related_searches}:
-                    self.related_searches.append(item)
-
-            # 提取人们也在问
-            paa = await self._parse_people_also_ask(task)
-            for item in paa:
-                if item.question not in {q.question for q in self.people_also_ask}:
-                    self.people_also_ask.append(item)
-
-            return {
-                "status": "success",
-                "extracted": len(results),
-                "total_collected": len(self.results),
-                "related_searches": len(self.related_searches),
-                "people_also_ask": len(self.people_also_ask),
-                "results": [r.to_dict() for r in results],
-                "related": [r.to_dict() for r in related],
-                "paa": [p.to_dict() for p in paa]
-            }
-
-        except Exception as e:
-            logger.error(f"Extract results error: {e}")
-            return {"status": "error", "message": str(e)}
-
     async def action_scroll_and_extract(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """滚动页面并提取结果"""
+        """滚动页面并提取结果并保存到数据库"""
         scroll_times = action_params.get("scroll_times", 10)
         max_items = action_params.get("max", 100)
 
-        logger.info(f"Scrolling {scroll_times} times...")
+        logger.info(f"[scroll_and_extract] 滚动次数={scroll_times}, 最大={max_items}")
+
+        # 清空之前的数据
+        self.results = []
+        self.related_searches = []
+        self.people_also_ask = []
+        self.processed_urls = set()
 
         for i in range(scroll_times):
+            if len(self.results) >= max_items:
+                logger.info(f"[scroll_and_extract] 已达到最大数量 {max_items}，停止")
+                break
+
+            logger.info(f"[scroll_and_extract] 第 {i + 1}/{scroll_times} 次滚动")
+
+            # 滚动到底部
             await self._scroll_to_bottom(task)
             await asyncio.sleep(1)
 
-            # 每次滚动后提取结果
+            # 提取当前可见的结果
             results = await self._parse_search_results(task, max_items)
             for result in results:
                 if result.url not in self.processed_urls:
                     self.results.append(result)
                     self.processed_urls.add(result.url)
 
-            logger.info(f"Scroll {i+1}/{scroll_times}, total: {len(self.results)}")
+            logger.info(f"[scroll_and_extract] 当前总数: {len(self.results)}")
 
-        # 最后再提取一次相关搜索
-        related = await self._parse_related_searches(task)
-        for item in related:
-            if item.query not in {r.query for r in self.related_searches}:
-                self.related_searches.append(item)
+            # 只在第一次提取相关搜索
+            if i == 0:
+                related = await self._parse_related_searches(task)
+                for item in related:
+                    if item.query not in {r.query for r in self.related_searches}:
+                        self.related_searches.append(item)
 
-        paa = await self._parse_people_also_ask(task)
-        for item in paa:
-            if item.question not in {q.question for q in self.people_also_ask}:
-                self.people_also_ask.append(item)
+                paa = await self._parse_people_also_ask(task)
+                for item in paa:
+                    if item.question not in {q.question for q in self.people_also_ask}:
+                        self.people_also_ask.append(item)
+
+        logger.info(f"[scroll_and_extract] 提取完成: 结果={len(self.results)}, 相关={len(self.related_searches)}, PAA={len(self.people_also_ask)}")
+
+        # 保存数据到数据库
+        saved_to = None
+        stats = None
+
+        if self.results or self.related_searches or self.people_also_ask:
+            from core.task_storage import TaskStorage
+            storage = TaskStorage()
+
+            resources = self._results_to_resources()
+
+            # 保存原始数据
+            raw_file = storage.save_raw_result(task.task_config.name, resources)
+
+            # 合并到数据库
+            stats = storage.merge_to_database(task.task_config.name, resources)
+            saved_to = str(raw_file)
+            logger.info(f"[scroll_and_extract] 保存完成: added={stats['added']}, skipped={stats['skipped']}")
 
         return {
             "status": "success",
+            "query": self.current_query,
             "scroll_times": scroll_times,
             "total_collected": len(self.results),
             "related_searches": len(self.related_searches),
-            "people_also_ask": len(self.people_also_ask)
+            "people_also_ask": len(self.people_also_ask),
+            "saved_to": saved_to,
+            "storage_stats": stats
         }
 
     async def action_status(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """获取状态"""
         return {
             "status": "success",
+            "actor": self.actor_name,
             "query": self.current_query,
             "results_collected": len(self.results),
             "related_searches": len(self.related_searches),
@@ -288,24 +269,14 @@ class BingSearchActor(BaseActor):
         }
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务并保存"""
-        if not self.results:
-            return {"status": "success", "message": "No results to save"}
+        """关闭任务实例"""
+        logger.info(f"[close] 关闭 Bing Search actor")
 
-        # 转换为 Resource 格式
-        resources = self.to_resources()
-
-        # 保存到存储
-        from core.task_storage import TaskStorage
-        storage = TaskStorage()
-        raw_file = storage.save_raw_result(self.actor_name, resources)
-        stats = storage.merge_to_database(self.actor_name, resources)
-
+        # 清空资源
         results_count = len(self.results)
         related_count = len(self.related_searches)
         paa_count = len(self.people_also_ask)
 
-        # 清空状态
         self.results = []
         self.related_searches = []
         self.people_also_ask = []
@@ -314,19 +285,11 @@ class BingSearchActor(BaseActor):
 
         return {
             "status": "success",
-            "results_saved": results_count,
-            "related_searches_saved": related_count,
-            "people_also_ask_saved": paa_count,
-            "saved_to": str(raw_file),
-            "storage_stats": stats
+            "message": "Bing Search actor closed",
+            "results_collected": results_count,
+            "related_searches": related_count,
+            "people_also_ask": paa_count
         }
-
-    async def _scroll_page(self, task):
-        """模拟人类滚动页面"""
-        await self._scroll_to_bottom(task)
-        await asyncio.sleep(1)
-        await task.page.evaluate("window.scrollTo(0, 0)")
-        await asyncio.sleep(1)
 
     async def _scroll_to_bottom(self, task):
         """滚动到页面底部"""
@@ -343,11 +306,11 @@ class BingSearchActor(BaseActor):
         results = []
 
         try:
-            logger.info("Starting to parse search results...")
+            logger.info("[_parse_search_results] 开始解析搜索结果...")
 
             # Bing 主结果选择器
             elements = await task.page.locator("li.b_algo").all()
-            logger.info(f"[_parse_search_results] Found {len(elements)} b_algo elements")
+            logger.info(f"[_parse_search_results] 找到 {len(elements)} 个 b_algo 元素")
 
             for idx, element in enumerate(elements):
                 if len(results) >= max_items:
@@ -401,16 +364,16 @@ class BingSearchActor(BaseActor):
                     )
                     results.append(result)
 
-                    logger.debug(f"  Result[{len(results)}]: {title[:50]}...")
+                    logger.debug(f"  结果[{len(results)}]: {title[:50]}...")
 
                 except Exception as e:
-                    logger.debug(f"Failed to parse element {idx}: {e}")
+                    logger.debug(f"[_parse_search_results] 解析元素 {idx} 失败: {e}")
                     continue
 
-            logger.info(f"Parsed {len(results)} search results")
+            logger.info(f"[_parse_search_results] 解析了 {len(results)} 个搜索结果")
 
         except Exception as e:
-            logger.error(f"Parse search results error: {e}")
+            logger.error(f"[_parse_search_results] 解析错误: {e}")
 
         return results
 
@@ -425,7 +388,7 @@ class BingSearchActor(BaseActor):
         results = []
 
         try:
-            logger.info("Starting to parse related searches...")
+            logger.info("[_parse_related_searches] 开始解析相关搜索...")
 
             # Bing 相关搜索选择器（按优先级）
             selectors = [
@@ -438,7 +401,7 @@ class BingSearchActor(BaseActor):
             for selector in selectors:
                 try:
                     elements = await task.page.locator(selector).all()
-                    logger.info(f"[_parse_related_searches] Selector '{selector}': found {len(elements)} elements")
+                    logger.info(f"[_parse_related_searches] 选择器 '{selector}': 找到 {len(elements)} 个元素")
 
                     if not elements:
                         continue
@@ -472,23 +435,23 @@ class BingSearchActor(BaseActor):
                                 rank=len(results) + 1
                             ))
 
-                            logger.debug(f"  RelatedSearch[{len(results)}]: {text}")
+                            logger.debug(f"  相关搜索[{len(results)}]: {text}")
 
                         except Exception as e:
-                            logger.debug(f"Failed to parse related link {idx}: {e}")
+                            logger.debug(f"[_parse_related_searches] 解析链接 {idx} 失败: {e}")
                             continue
 
                     if results:
                         break
 
                 except Exception as e:
-                    logger.debug(f"Selector '{selector}' failed: {e}")
+                    logger.debug(f"[_parse_related_searches] 选择器 '{selector}' 失败: {e}")
                     continue
 
-            logger.info(f"Parsed {len(results)} related searches")
+            logger.info(f"[_parse_related_searches] 解析了 {len(results)} 个相关搜索")
 
         except Exception as e:
-            logger.error(f"Parse related searches error: {e}")
+            logger.error(f"[_parse_related_searches] 错误: {e}")
 
         return results
 
@@ -501,10 +464,10 @@ class BingSearchActor(BaseActor):
         results = []
 
         try:
-            logger.debug("People also ask not available for Bing (feature may not exist)")
+            logger.debug("[_parse_people_also_ask] Bing 可能没有此功能")
 
         except Exception as e:
-            logger.debug(f"Parse people also ask error: {e}")
+            logger.debug(f"[_parse_people_also_ask] 错误: {e}")
 
         return results
 
@@ -530,7 +493,7 @@ class BingSearchActor(BaseActor):
 
         return True
 
-    def to_resources(self) -> List[Resource]:
+    def _results_to_resources(self) -> List[Resource]:
         """将结果转换为 Resource 格式"""
         resources = []
 
@@ -558,10 +521,13 @@ class BingSearchActor(BaseActor):
 
         # 相关搜索结果
         for related in self.related_searches:
+            from urllib.parse import urlencode
+            search_url = f"{self.SEARCH_URL}?{urlencode({'q': related.query})}"
+
             resource = Resource(
                 id=f"bs_rs_{hashlib.md5(related.query.encode('utf-8')).hexdigest()[:12]}",
                 resource_type="related_search",
-                resource_url="",
+                resource_url=search_url,
                 resource_content="",
                 description=related.display_text,
                 resource_platform="Bing Search",
@@ -580,10 +546,13 @@ class BingSearchActor(BaseActor):
 
         # 人们也在问结果
         for paa in self.people_also_ask:
+            from urllib.parse import urlencode
+            search_url = f"{self.SEARCH_URL}?{urlencode({'q': paa.question})}"
+
             resource = Resource(
                 id=f"bs_paa_{hashlib.md5(paa.question.encode('utf-8')).hexdigest()[:12]}",
                 resource_type="people_also_ask",
-                resource_url="",
+                resource_url=search_url,
                 resource_content="",
                 description=paa.question,
                 resource_platform="Bing Search",

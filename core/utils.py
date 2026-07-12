@@ -31,6 +31,16 @@ class HumanUtils:
         2. 随机停顿
         """
         try:
+            # 检查 page 对象是否有效
+            if page is None:
+                raise RuntimeError("Page object is None - browser connection may be lost")
+
+            # 检查页面是否仍然可访问（通过尝试访问 URL）
+            try:
+                current_url = page.url
+            except Exception as e:
+                raise RuntimeError(f"Page is no longer accessible: {e}")
+
             # 随机滚动 400px 到 800px
             scroll_y = random.randint(400, 800)
             await page.mouse.wheel(0, scroll_y)

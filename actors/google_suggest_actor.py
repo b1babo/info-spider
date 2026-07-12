@@ -2,6 +2,7 @@
 Google Suggest Actor - Google 搜索建议关键词挖掘
 
 无需浏览器，直接调用 Google Suggest API 获取搜索建议。
+遵循标准的 create -> extract -> close 模式
 """
 import logging
 import json
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleSuggestActor(BaseActor):
-    """Google 搜索建议 Actor - 关键词挖掘"""
+    """Google 搜索建议 Actor - 标准模式"""
 
     actor_name = "google_suggest_actor"
     actor_description = "Google 搜索建议关键词挖掘（纯API模式）"
@@ -40,7 +41,7 @@ class GoogleSuggestActor(BaseActor):
         self.register_action(
             "get_suggestions",
             self.action_get_suggestions,
-            description="获取单个关键词的搜索建议",
+            description="获取单个关键词的搜索建议并保存到数据库",
             params_schema={
                 "params": [
                     {"name": "keyword", "type": "string", "required": True},
@@ -52,7 +53,7 @@ class GoogleSuggestActor(BaseActor):
         self.register_action(
             "expand_keywords",
             self.action_expand_keywords,
-            description="扩展关键词（字母+修饰词）",
+            description="扩展关键词并保存到数据库",
             params_schema={
                 "params": [
                     {"name": "seed", "type": "string", "required": True},
@@ -67,23 +68,12 @@ class GoogleSuggestActor(BaseActor):
         self.register_action(
             "batch_expand",
             self.action_batch_expand,
-            description="批量扩展多个种子词",
+            description="批量扩展多个种子词并保存到数据库",
             params_schema={
                 "params": [
                     {"name": "seeds", "type": "array", "required": True},
                     {"name": "max_per_seed", "type": "integer", "required": False, "default": 100},
                     {"name": "delay", "type": "number", "required": False, "default": 1.0}
-                ]
-            }
-        )
-
-        self.register_action(
-            "export_results",
-            self.action_export_results,
-            description="导出结果为 JSON",
-            params_schema={
-                "params": [
-                    {"name": "format", "type": "string", "required": False, "default": "json"}
                 ]
             }
         )
@@ -98,13 +88,14 @@ class GoogleSuggestActor(BaseActor):
         self.register_action(
             "close",
             self.action_close,
-            description="关闭任务",
+            description="关闭任务实例",
             params_schema={"params": []}
         )
 
         # 状态变量
         self.suggestions_data: Dict[str, Any] = {}
         self.expanded_keywords: List[str] = []
+        self.resources: List[Resource] = []
 
     def _get_headers(self) -> Dict[str, str]:
         """获取请求头"""
@@ -142,10 +133,88 @@ class GoogleSuggestActor(BaseActor):
             logger.error(f"Error fetching suggestions for '{keyword}': {e}")
             return []
 
+    def _build_keyword_resources(self, keywords: List[str]) -> List[Resource]:
+        """将关键词转换为 Resource 对象"""
+        import hashlib
+        resources = []
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+
+        for keyword in keywords:
+            keyword_hash = hashlib.md5(keyword.encode('utf-8')).hexdigest()[:16]
+            resource = Resource(
+                id=f"kw_{keyword_hash}",
+                resource_type="keyword",
+                resource_url=f"https://www.google.com/search?q={keyword}",
+                resource_content=keyword,
+                description=f"Keyword: {keyword}",
+                resource_platform="Google Suggest",
+                resource_platform_url="https://www.google.com",
+                resource_author_name="Google Suggest API",
+                resource_create_time=timestamp,
+            )
+            resources.append(resource)
+
+        return resources
+
+    async def _save_data(self, task, keywords: List[str]) -> Dict[str, Any]:
+        """保存关键词数据"""
+        if not keywords:
+            return {"saved_to": None, "storage_stats": None}
+
+        # 构建 Resource 对象
+        resources = self._build_keyword_resources(keywords)
+
+        # 保存到数据库
+        from core.task_storage import TaskStorage
+        storage = TaskStorage()
+
+        # 1. 保存原始JSON到任务专属目录
+        data_dir = task.get_data_dir()
+        raw_file = storage.save_raw_result_to_dir(data_dir, resources)
+
+        # 2. 合并到数据库
+        stats = storage.merge_to_database(task.task_config.name, resources)
+
+        logger.info(f"[_save_data] Keywords saved: added={stats['added']}, skipped={stats['skipped']}")
+
+        return {
+            "saved_to": str(raw_file),
+            "storage_stats": stats
+        }
+
+    async def _export_analysis(self, task, keywords: List[str]) -> str:
+        """导出关键词分析结果到 JSON"""
+        if not keywords:
+            return None
+
+        # 分析关键词
+        keyword_analysis = self._analyze_keywords(keywords)
+
+        export_data = {
+            "keywords": keywords,
+            "count": len(keywords),
+            "analysis": keyword_analysis,
+            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+        # 保存到任务专属目录
+        data_dir = task.get_data_dir()
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_file = data_dir / f"analysis_{timestamp}.json"
+
+        with open(export_file, 'w', encoding='utf-8') as f:
+            json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"[_export_analysis] 分析结果已保存: {export_file}")
+        return str(export_file)
+
     async def action_create(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """初始化任务"""
         self.suggestions_data = {}
         self.expanded_keywords = []
+        self.resources = []
 
         return {
             "status": "success",
@@ -154,13 +223,14 @@ class GoogleSuggestActor(BaseActor):
         }
 
     async def action_get_suggestions(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取单个关键词的搜索建议"""
+        """获取单个关键词的搜索建议并保存"""
         keyword = action_params.get("keyword", "")
         language = action_params.get("language", "en")
 
         if not keyword:
             return {"status": "error", "message": "keyword is required"}
 
+        logger.info(f"[get_suggestions] 获取建议: {keyword}")
         suggestions = await self._fetch_suggestions(task, keyword, language)
 
         # 保存数据
@@ -170,15 +240,19 @@ class GoogleSuggestActor(BaseActor):
             "language": language
         }
 
+        # 保存到数据库
+        save_result = await self._save_data(task, suggestions)
+
         return {
             "status": "success",
             "keyword": keyword,
-            "suggestions": suggestions,
-            "count": len(suggestions)
+            "count": len(suggestions),
+            "saved_to": save_result.get("saved_to"),
+            "storage_stats": save_result.get("storage_stats")
         }
 
     async def action_expand_keywords(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """扩展关键词"""
+        """扩展关键词并保存"""
         seed = action_params.get("seed", "")
         use_alphabet = action_params.get("alphabet", True)
         use_questions = action_params.get("questions", True)
@@ -187,6 +261,8 @@ class GoogleSuggestActor(BaseActor):
 
         if not seed:
             return {"status": "error", "message": "seed is required"}
+
+        logger.info(f"[expand_keywords] 扩展关键词: {seed}")
 
         results = {
             "seed": seed,
@@ -200,14 +276,14 @@ class GoogleSuggestActor(BaseActor):
         all_suggestions = []
 
         # 1. 基础建议
-        logger.info(f"Fetching base suggestions for: {seed}")
+        logger.info(f"[expand_keywords] 获取基础建议: {seed}")
         base = await self._fetch_suggestions(task, seed, language)
         results["base_suggestions"] = base
         all_suggestions.extend(base)
 
         # 2. 字母扩展
         if use_alphabet:
-            logger.info(f"Fetching alphabet expansions for: {seed}")
+            logger.info(f"[expand_keywords] 字母扩展")
             alphabet_results = []
             for letter in "abcdefghijklmnopqrstuvwxyz":
                 expanded = await self._fetch_suggestions(task, f"{seed} {letter}", language)
@@ -218,7 +294,7 @@ class GoogleSuggestActor(BaseActor):
 
         # 3. 问题词扩展
         if use_questions:
-            logger.info(f"Fetching question expansions for: {seed}")
+            logger.info(f"[expand_keywords] 问题词扩展")
             question_prefixes = [
                 "how to", "what is", "why", "where", "when", "who", "which",
                 "can", "will", "do", "does", "are", "is", "best", "top"
@@ -233,7 +309,7 @@ class GoogleSuggestActor(BaseActor):
 
         # 4. 修饰词扩展
         if use_modifiers:
-            logger.info(f"Fetching modifier expansions for: {seed}")
+            logger.info(f"[expand_keywords] 修饰词扩展")
             modifiers = [
                 "free", "cheap", "online", "near me", "tutorial", "guide",
                 "review", "comparison", "vs", "alternative", "example",
@@ -255,15 +331,25 @@ class GoogleSuggestActor(BaseActor):
         self.suggestions_data[seed] = results
         self.expanded_keywords = unique_suggestions
 
-        logger.info(f"Keyword expansion complete: {len(unique_suggestions)} unique keywords")
+        logger.info(f"[expand_keywords] 扩展完成: {len(unique_suggestions)} 个唯一关键词")
+
+        # 保存到数据库
+        save_result = await self._save_data(task, unique_suggestions)
+
+        # 导出分析结果
+        export_file = await self._export_analysis(task, unique_suggestions)
 
         return {
             "status": "success",
-            "results": results
+            "seed": seed,
+            "total_unique": results.get("total_unique", 0),
+            "saved_to": save_result.get("saved_to"),
+            "storage_stats": save_result.get("storage_stats"),
+            "analysis_file": export_file
         }
 
     async def action_batch_expand(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """批量扩展多个种子词"""
+        """批量扩展多个种子词并保存"""
         seeds = action_params.get("seeds", [])
         max_per_seed = action_params.get("max_per_seed", 100)
         delay = action_params.get("delay", 1.0)
@@ -271,10 +357,13 @@ class GoogleSuggestActor(BaseActor):
         if not seeds:
             return {"status": "error", "message": "seeds is required"}
 
+        logger.info(f"[batch_expand] 批量扩展 {len(seeds)} 个种子词")
+
         all_results = {}
+        all_keywords = []
 
         for i, seed in enumerate(seeds):
-            logger.info(f"Processing seed {i+1}/{len(seeds)}: {seed}")
+            logger.info(f"[batch_expand] 处理种子 {i+1}/{len(seeds)}: {seed}")
 
             result = await self.action_expand_keywords(task, {
                 "seed": seed,
@@ -291,61 +380,33 @@ class GoogleSuggestActor(BaseActor):
                     result["results"]["alphabet_expanded"] +
                     result["results"]["question_expanded"] +
                     result["results"]["modifier_expanded"]
-                ))
+                ))[:max_per_seed]
+
                 all_results[seed] = {
                     "seed": seed,
-                    "keywords": unique_keywords[:max_per_seed],
-                    "count": len(unique_keywords[:max_per_seed])
+                    "keywords": unique_keywords,
+                    "count": len(unique_keywords)
                 }
+                all_keywords.extend(unique_keywords)
 
             # 延迟避免速率限制
             if i < len(seeds) - 1:
                 await asyncio.sleep(delay)
 
+        # 保存所有关键词
+        save_result = await self._save_data(task, all_keywords)
+
+        # 导出分析结果
+        export_file = await self._export_analysis(task, all_keywords)
+
         return {
             "status": "success",
-            "results": all_results,
             "total_seeds": len(seeds),
-            "total_keywords": sum(r["count"] for r in all_results.values())
+            "total_keywords": len(all_keywords),
+            "saved_to": save_result.get("saved_to"),
+            "storage_stats": save_result.get("storage_stats"),
+            "analysis_file": export_file
         }
-
-    async def action_export_results(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """导出结果到任务专属目录"""
-        format_type = action_params.get("format", "json")
-
-        if not self.expanded_keywords:
-            return {"status": "error", "message": "No keywords to export"}
-
-        # 分析关键词
-        keyword_analysis = self._analyze_keywords(self.expanded_keywords)
-
-        export_data = {
-            "keywords": self.expanded_keywords,
-            "count": len(self.expanded_keywords),
-            "analysis": keyword_analysis,
-            "exported_at": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-
-        if format_type == "json":
-            # 保存到任务专属目录
-            data_dir = task.get_data_dir()
-            data_dir.mkdir(parents=True, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            export_file = data_dir / f"export_{timestamp}.json"
-
-            with open(export_file, 'w', encoding='utf-8') as f:
-                json.dump(export_data, f, ensure_ascii=False, indent=2)
-
-            logger.info(f"Export data saved to: {export_file}")
-
-            return {
-                "status": "success",
-                "data": export_data,
-                "file": str(export_file)
-            }
-
-        return {"status": "error", "message": f"Unsupported format: {format_type}"}
 
     def _analyze_keywords(self, keywords: List[str]) -> Dict[str, Any]:
         """分析关键词"""
@@ -383,55 +444,17 @@ class GoogleSuggestActor(BaseActor):
         }
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务"""
-        saved_path = None
-        export_path = None
-        stats = {"total": 0, "added": 0, "skipped": 0}
+        """关闭任务实例"""
+        logger.info(f"[close] 关闭 Google Suggest actor")
 
-        # 保存数据到任务专属目录
-        if self.expanded_keywords:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-
-            # 将关键词转换为 Resource 对象
-            import hashlib
-            resources = []
-            timestamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-            for keyword in self.expanded_keywords:
-                keyword_hash = hashlib.md5(keyword.encode('utf-8')).hexdigest()[:16]
-                resource = Resource(
-                    id=f"kw_{keyword_hash}",
-                    resource_type="keyword",
-                    resource_url=f"https://www.google.com/search?q={keyword}",
-                    resource_content=keyword,
-                    resource_platform="Google Suggest",
-                    resource_author_name="Google Suggest API",
-                    resource_create_time=timestamp,
-                )
-                resources.append(resource)
-
-            # 保存到任务专属目录 data/tasks/{task_id}/
-            data_dir = task.get_data_dir()
-            raw_file = storage.save_raw_result_to_dir(data_dir, resources)
-
-            # 合并到数据库
-            stats = storage.merge_to_database(task.task_config.name, resources)
-            saved_path = str(raw_file)
-            logger.info(f"[{task.task_id}] Keywords saved: added={stats['added']}, skipped={stats['skipped']}")
-
-            # 导出分析结果
-            export_result = await self.action_export_results(task, {"format": "json"})
-            if export_result.get("status") == "success":
-                export_path = export_result.get("file")
-                logger.info(f"[{task.task_id}] Export saved to: {export_path}")
-
+        # 清空资源
+        collected = len(self.expanded_keywords)
         self.expanded_keywords = []
         self.suggestions_data = {}
+        self.resources = []
 
         return {
             "status": "success",
-            "message": "Actor closed",
-            "saved_to": saved_path,
-            "export_file": export_path,
-            "storage_stats": stats
+            "message": "Google Suggest actor closed",
+            "keywords_collected": collected
         }
