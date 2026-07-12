@@ -52,17 +52,6 @@ class RedditCommunityActor(BaseActor):
         )
 
         self.register_action(
-            "extract_posts",
-            self.action_extract_posts,
-            description="提取已收集的帖子",
-            params_schema={
-                "params": [
-                    {"name": "max", "type": "integer", "required": False, "default": 100}
-                ]
-            }
-        )
-
-        self.register_action(
             "status",
             self.action_status,
             description="获取状态",
@@ -102,25 +91,45 @@ class RedditCommunityActor(BaseActor):
         max_comments_per_level = action_params.get('max_comments_per_level', 3)
         reset = action_params.get('reset', True)
 
+        logger.info(f"[RedditCommunityActor] 开始抓取: scroll_times={scroll_times}, max={max_items}, reset={reset}")
+
         if reset:
+            logger.info("[RedditCommunityActor] 重置收集器，开始新的抓取会话")
             self.resources = []
             self.processed_ids = set()
-
-        logger.info(f"开始抓取: scroll_times={scroll_times}, max={max_items}")
+        else:
+            logger.info(f"[RedditCommunityActor] 累加模式，当前已有 {len(self.resources)} 条数据")
 
         for i in range(scroll_times):
             if len(self.resources) >= max_items:
                 logger.info(f"已达到最大采集数量 {max_items}，停止滚动")
                 break
 
-            logger.info(f"Scroll {i + 1}")
+            logger.info(f"Scroll {i + 1}/{scroll_times}")
             await self._process_current_posts(task, max_items, max_comments_depth, max_comments_per_level)
 
             if len(self.resources) < max_items:
                 await HumanUtils.smart_scroll(task.page, 1, 2)
                 await asyncio.sleep(2)
 
-        return await self.action_extract_posts(task, {"max": max_items})
+        # 保存数据
+        saved_to = None
+        stats = None
+        if self.resources:
+            from core.task_storage import TaskStorage
+            storage = TaskStorage()
+            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
+            stats = storage.merge_to_database(task.task_config.name, self.resources)
+            saved_to = str(raw_file)
+            logger.info(f"[RedditCommunityActor] 保存完成: raw={raw_file.name}, added={stats['added']}, skipped={stats['skipped']}")
+
+        return {
+            "status": "success",
+            "total_collected": len(self.resources),
+            "scroll_times": scroll_times + i,  # 实际滚动次数
+            "saved_to": saved_to,
+            "storage_stats": stats
+        }
 
     async def _process_current_posts(self, task, max_items: int, max_comments_depth: int, max_comments_per_level: int):
         """处理当前可见的帖子"""
@@ -300,74 +309,19 @@ class RedditCommunityActor(BaseActor):
         parsed_comments = []
 
         try:
-            # 查找评论
-            if current_depth == 1:
-                comment_locators = await page.locator("shreddit-comment-tree > shreddit-comment").all()
-            else:
-                # 对于嵌套评论，使用不同的选择器
-                comment_locators = await page.locator("shreddit-comment").all()
+            # 查找评论 - 统一使用 query_selector_all
+            comment_elems = await page.query_selector_all('shreddit-comment')
 
-            if len(comment_locators) > max_per_level:
-                comment_locators = comment_locators[:max_per_level]
+            if len(comment_elems) > max_per_level:
+                comment_elems = comment_elems[:max_per_level]
 
-            for comment_elem in comment_locators:
-                try:
-                    c_id = await comment_elem.get_attribute("id") or await comment_elem.get_attribute("thingid") or ""
-                    c_author = await comment_elem.get_attribute("author") or ""
-                    c_score = await comment_elem.get_attribute("score") or "0"
+            logger.info(f"[RedditCommunityActor] Depth {current_depth}: found {len(comment_elems)} comment elements")
 
-                    # 提取评论内容 - 使用 .first 只获取第一个匹配（评论自己的内容）
-                    c_text = ""
-                    try:
-                        c_body_div = comment_elem.locator("div[slot='comment']").first
-                        if await c_body_div.count() > 0:
-                            c_text = await c_body_div.inner_text()
-                    except Exception as e:
-                        # 如果 first 也失败了，尝试用其他方式获取
-                        try:
-                            c_body_div = comment_elem.locator("div[slot='comment']").nth(0)
-                            c_text = await c_body_div.inner_text()
-                        except:
-                            logger.debug(f"无法提取评论 {c_id} 的内容: {e}")
-
-                    if not c_text:
-                        continue
-
-                    # 递归解析子评论 - 只处理当前评论的子评论
-                    child_comments = []
-                    if current_depth < max_depth:
-                        try:
-                            child_locators = await comment_elem.locator("shreddit-comment").all()
-                            if child_locators:
-                                # 为每个子评论创建资源对象
-                                for child_elem in child_locators[:max_per_level]:
-                                    child_comment = await self._parse_single_comment(child_elem, max_depth, max_per_level, current_depth + 1)
-                                    if child_comment:
-                                        child_comments.append(child_comment)
-                        except Exception as e:
-                            logger.debug(f"解析子评论失败: {e}")
-
-                    comment_obj = Resource(
-                        id=c_id,
-                        resource_url=f"https://www.reddit.com/user/{c_author}/",
-                        resource_content=c_text,
-                        resource_type="comment",
-                        resource_platform="Reddit",
-                        resource_platform_url="https://www.reddit.com",
-                        resource_author_name=c_author,
-                        resource_author_display_name=c_author,
-                        resource_author_url=f"https://www.reddit.com/user/{c_author}/",
-                        analytics=Analytics(
-                            like_count=utils.convert_to_number(c_score),
-                            reply_count=len(child_comments)
-                        ),
-                        comment_resource=child_comments
-                    )
+            # 使用专门的递归方法处理每个评论
+            for comment_elem in comment_elems:
+                comment_obj = await self._parse_single_comment(comment_elem, max_depth, max_per_level, current_depth)
+                if comment_obj:
                     parsed_comments.append(comment_obj)
-
-                except Exception as e:
-                    logger.warning(f"解析单条评论失败: {e}")
-                    continue
 
         except Exception as e:
             logger.warning(f"解析评论失败 (depth={current_depth}): {e}")
@@ -384,34 +338,36 @@ class RedditCommunityActor(BaseActor):
             c_author = await comment_elem.get_attribute("author") or ""
             c_score = await comment_elem.get_attribute("score") or "0"
 
-            # 提取评论内容
+            # 提取评论内容 - 使用 query_selector 而不是 locator
             c_text = ""
             try:
-                c_body_div = comment_elem.locator("div[slot='comment']").first
-                if await c_body_div.count() > 0:
+                c_body_div = await comment_elem.query_selector("div[slot='comment']")
+                if c_body_div:
                     c_text = await c_body_div.inner_text()
+                else:
+                    # 回退到整个元素的文本
+                    c_text = await comment_elem.inner_text()
             except Exception:
                 try:
-                    c_body_div = comment_elem.locator("div[slot='comment']").nth(0)
-                    c_text = await c_body_div.inner_text()
+                    c_text = await comment_elem.inner_text()
                 except:
                     pass
 
-            if not c_text:
+            if not c_text or len(c_text.strip()) == 0:
                 return None
 
-            # 递归解析子评论
+            # 递归解析子评论 - 使用 query_selector_all 而不是 locator
             child_comments = []
             if current_depth < max_depth:
                 try:
-                    child_locators = await comment_elem.locator("shreddit-comment").all()
-                    if child_locators:
-                        for child_elem in child_locators[:max_per_level]:
+                    child_elems = await comment_elem.query_selector_all("shreddit-comment")
+                    if child_elems and len(child_elems) > 0:
+                        for child_elem in child_elems[:max_per_level]:
                             child_comment = await self._parse_single_comment(child_elem, max_depth, max_per_level, current_depth + 1)
                             if child_comment:
                                 child_comments.append(child_comment)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug(f"解析子评论失败: {e}")
 
             return Resource(
                 id=c_id,
@@ -434,41 +390,6 @@ class RedditCommunityActor(BaseActor):
             logger.debug(f"解析单个评论失败: {e}")
             return None
 
-    async def action_extract_posts(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取已收集的帖子"""
-        max_items = action_params.get('max', 100)
-        count = min(len(self.resources), max_items)
-
-        result = {
-            "status": "success",
-            "total_collected": len(self.resources),
-            "returned": count,
-            "posts": []
-        }
-
-        for i, resource in enumerate(self.resources[:count]):
-            result["posts"].append({
-                "id": resource.id,
-                "title": resource.description,
-                "content": resource.resource_content[:200] + "..." if len(resource.resource_content) > 200 else resource.resource_content,
-                "author": resource.resource_author_name,
-                "url": resource.resource_url,
-                "likes": resource.analytics.like_count if resource.analytics else 0,
-                "comments": resource.analytics.reply_count if resource.analytics else 0,
-                "hashtags": resource.hashtags
-            })
-
-        # 保存数据
-        if self.resources:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            result["saved_to"] = str(raw_file)
-            result["storage_stats"] = stats
-
-        return result
-
     async def action_status(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """获取状态"""
         return {
@@ -479,17 +400,15 @@ class RedditCommunityActor(BaseActor):
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """关闭任务"""
-        saved_path = None
-        if self.resources:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            logger.info(f"Data saved: added={stats['added']}, skipped={stats['skipped']}")
-            saved_path = str(raw_file)
+        # 关闭页面
+        try:
+            await task.page.close()
+            logger.info(f"[close] 页面已关闭")
+        except Exception as e:
+            logger.warning(f"[close] 关闭页面时出错: {e}")
 
         return {
             "status": "success",
-            "resources_collected": len(self.resources),
-            "saved_to": saved_path
+            "message": "Reddit community actor 已彻底关闭",
+            "resources_collected": len(self.resources)
         }

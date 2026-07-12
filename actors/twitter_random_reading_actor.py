@@ -38,7 +38,7 @@ class TwitterRandomReadingActor(BaseActor):
         self.register_action(
             "scroll_and_extract",
             self.action_scroll_and_extract,
-            description="滚动并提取推文",
+            description="滚动页面并提取内容（推文+文章），立即保存并返回统计信息",
             params_schema={
                 "params": [
                     {"name": "scroll_times", "type": "integer", "required": False, "default": 10},
@@ -72,7 +72,7 @@ class TwitterRandomReadingActor(BaseActor):
         }
 
     async def action_scroll_and_extract(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """滚动并提取推文"""
+        """滚动页面并提取内容（推文+文章），立即保存并返回统计信息"""
         scroll_times = action_params.get('scroll_times', 10)
         max = action_params.get('max', 100)
         time_range = action_params.get('time_range', 24)
@@ -88,41 +88,37 @@ class TwitterRandomReadingActor(BaseActor):
         for i in range(scroll_times):
             if self.stop_scroll:
                 break
-            logger.info(f"Scroll {i + 1}")
+            logger.info(f"[首页推荐] Scroll {i + 1}")
             await HumanUtils.smart_scroll(task.page, 1, 3)
 
-        return await self.action_extract_tweets(task, {"max": max, "time_range": time_range})
-
-    async def action_extract_tweets(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取推文"""
-        max = action_params.get('max', 100)
+        # 保存数据并返回统计信息
         count = min(len(self.resources), max)
 
-        result = {
-            "status": "success",
-            "total_collected": len(self.resources),
-            "returned": count,
-            "tweets": []
-        }
-
-        for i, resource in enumerate(self.resources[:count]):
-            result["tweets"].append({
-                "id": resource.id,
-                "content": resource.resource_content,
-                "author": resource.resource_author_name,
-                "url": resource.resource_url
-            })
-
-        # 保存
+        # 保存数据
+        saved_to = None
+        stats = None
         if self.resources:
             from core.task_storage import TaskStorage
             storage = TaskStorage()
             raw_file = storage.save_raw_result(task.task_config.name, self.resources)
             stats = storage.merge_to_database(task.task_config.name, self.resources)
-            result["saved_to"] = str(raw_file)
-            result["storage_stats"] = stats
+            saved_to = str(raw_file)
+            logger.info(f"[首页推荐] 保存完成: raw={raw_file.name}, added={stats['added']}, skipped={stats['skipped']}")
 
-        return result
+        # 统计类型
+        tweet_count = len([r for r in self.resources if r.resource_type == "tweet"])
+        article_count = len([r for r in self.resources if r.resource_type == "article"])
+
+        return {
+            "status": "success",
+            "page_type": "home_timeline",
+            "total_collected": count,
+            "tweets": tweet_count,
+            "articles": article_count,
+            "time_range_hours": time_range,
+            "saved_to": saved_to,
+            "storage_stats": stats
+        }
 
     async def action_intercept_response(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """拦截响应"""
@@ -142,14 +138,17 @@ class TwitterRandomReadingActor(BaseActor):
         }
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务"""
-        saved_path = None
-        if self.resources:
-            saved_path = await self._save_data(task)
+        """关闭任务并关闭页面（数据已在 scroll_and_extract 中保存）"""
+        try:
+            await task.page.close()
+            logger.info(f"[close] 页面已关闭")
+        except Exception as e:
+            logger.warning(f"[close] 关闭页面时出错: {e}")
+
         return {
             "status": "success",
-            "resources_collected": len(self.resources),
-            "saved_to": saved_path
+            "message": "Twitter random reading actor 已关闭",
+            "resources_collected": len(self.resources)
         }
 
     async def _intercept_response(self, response: Response):
@@ -192,10 +191,91 @@ class TwitterRandomReadingActor(BaseActor):
         return tweets
 
     def _extract_tweet_data(self, tweet_result) -> Resource:
-        """提取推文数据"""
+        """提取推文/文章数据（自动判断类型）"""
         if not tweet_result:
             return None
 
+        # 检查是否为文章
+        if 'article' in tweet_result:
+            return self._extract_article_data(tweet_result)
+        else:
+            return self._extract_tweet_only_data(tweet_result)
+
+    def _extract_article_data(self, tweet_result) -> Resource:
+        """提取文章数据"""
+        try:
+            article = jmespath.search('article.article_results.result', tweet_result)
+            if not article:
+                # 回退到推文处理
+                return self._extract_tweet_only_data(tweet_result)
+
+            # 提取用户信息
+            user_result = tweet_result.get('core', {}).get('user_results', {}).get('result', {})
+            user_legacy = user_result.get('legacy', {})
+            user_core = user_result.get('core', {})
+            screen_name = user_core.get('screen_name', '')
+
+            author = Author(
+                id=user_result.get('rest_id', ''),
+                author_url=f"https://x.com/{screen_name}",
+                author_name=screen_name,
+                author_display_name=user_core.get('name', ''),
+                followers_count=user_legacy.get("followers_count", 0),
+                following_count=user_legacy.get("following_count", 0)
+            )
+
+            # 提取文章内容
+            legacy = tweet_result.get('legacy', {})
+            views = tweet_result.get('views', {})
+
+            analytics = Analytics(
+                view_count=int(views.get("count", "0") or 0),
+                like_count=legacy.get("favorite_count", 0),
+                reply_count=legacy.get("reply_count", 0),
+                share_count=legacy.get("retweet_count", 0)
+            )
+
+            title = article.get('title', '') or ''
+            summary = article.get('summary_text', '') or ''
+
+            # 简化版文章内容提取（完整解析需要 Draft.js 处理）
+            content_state = article.get('content_state', {})
+            if content_state.get('blocks'):
+                blocks = content_state.get('blocks', [])
+                texts = [block.get('text', '') for block in blocks if block.get('text')]
+                body_content = "\n\n".join(texts)
+            else:
+                body_content = legacy.get("full_text", "")
+
+            # 拼接完整内容
+            parts = []
+            if title:
+                parts.append(f"# {title}")
+            if summary:
+                parts.append(f"> {summary}".replace("\n", "\n> "))
+            if body_content:
+                parts.append(body_content)
+            content = "\n\n".join(parts).strip()
+
+            return Resource(
+                id=tweet_result.get('rest_id', ''),
+                resource_url=f"https://x.com/{screen_name}/status/{tweet_result.get('rest_id', '')}",
+                resource_content=content[:5000],  # 文章可能更长
+                resource_type="article",
+                description=title,
+                resource_platform="X/Twitter",
+                resource_author_name=screen_name,
+                resource_author_display_name=user_core.get('name', ''),
+                is_pinned=False,
+                analytics=analytics,
+                resource_create_time=legacy.get("created_at", "")
+            )
+        except Exception as e:
+            logger.error(f"[提取文章数据失败: {e}")
+            return self._extract_tweet_only_data(tweet_result)
+
+    def _extract_tweet_only_data(self, tweet_result) -> Resource:
+        """提取普通推文数据"""
         # 提取用户信息
         user_result = tweet_result.get('core', {}).get('user_results', {}).get('result', {})
         user_legacy = user_result.get('legacy', {})
@@ -228,7 +308,8 @@ class TwitterRandomReadingActor(BaseActor):
         return Resource(
             id=tweet_result.get('rest_id', ''),
             resource_url=f"https://x.com/{screen_name}/status/{tweet_result.get('rest_id', '')}",
-            resource_content=content,
+            resource_content=content[:1000],
+            resource_type="tweet",
             resource_platform="X/Twitter",
             resource_author_name=screen_name,
             resource_author_display_name=user_core.get('name', ''),
@@ -236,19 +317,3 @@ class TwitterRandomReadingActor(BaseActor):
             analytics=analytics,
             resource_create_time=legacy.get("created_at", "")
         )
-
-    async def _save_data(self, task) -> str:
-        """保存数据"""
-        if not self.resources:
-            return None
-
-        try:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            logger.info(f"Data saved: added={stats['added']}, skipped={stats['skipped']}")
-            return str(raw_file)
-        except Exception as e:
-            logger.error(f"Error saving data: {e}")
-            return None

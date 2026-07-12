@@ -62,20 +62,9 @@ class TwitterTrendingActor(BaseActor):
         )
 
         self.register_action(
-            "extract_trends",
-            self.action_extract_trends,
-            description="提取趋势数据",
-            params_schema={
-                "params": [
-                    {"name": "max", "type": "integer", "required": False, "default": 50, "description": "最大提取数量"}
-                ]
-            }
-        )
-
-        self.register_action(
             "scroll_and_extract",
             self.action_scroll_and_extract,
-            description="滚动页面并提取趋势",
+            description="滚动页面并提取趋势，立即保存并返回统计信息",
             params_schema={
                 "params": [
                     {"name": "scroll_times", "type": "integer", "required": False, "default": 10, "description": "滚动次数"},
@@ -127,17 +116,17 @@ class TwitterTrendingActor(BaseActor):
         }
 
     async def action_close(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """关闭任务"""
-        # 保存数据
-        saved_path = None
-        if self.resources:
-            saved_path = await self._save_data(task)
+        """关闭任务并关闭页面（数据已在 scroll_and_extract 中保存）"""
+        try:
+            await task.page.close()
+            logger.info(f"[close] 页面已关闭")
+        except Exception as e:
+            logger.warning(f"[close] 关闭页面时出错: {e}")
 
         return {
             "status": "success",
-            "message": "Twitter actor closed",
-            "resources_collected": len(self.resources),
-            "saved_to": saved_path
+            "message": "Twitter trending actor 已关闭",
+            "resources_collected": len(self.resources)
         }
 
     # ===== Twitter特定Actions =====
@@ -161,41 +150,8 @@ class TwitterTrendingActor(BaseActor):
             "interception_enabled": enable
         }
 
-    async def action_extract_trends(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """提取已收集的趋势数据"""
-        max = action_params.get('max', 50)
-
-        count = min(len(self.resources), max)
-
-        result = {
-            "status": "success",
-            "total_collected": len(self.resources),
-            "returned": count,
-            "trends": []
-        }
-
-        for i, resource in enumerate(self.resources[:count]):
-            trend_data = {
-                "content": resource.resource_content,
-                "description": resource.description,
-                "url": resource.resource_url,
-                "post_count": resource.analytics.reply_count if resource.analytics else 0
-            }
-            result["trends"].append(trend_data)
-
-        # 使用 TaskStorage 保存
-        if self.resources:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-            result["saved_to"] = str(raw_file)
-            result["storage_stats"] = stats
-
-        return result
-
     async def action_scroll_and_extract(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
-        """滚动页面并提取趋势"""
+        """滚动页面并提取趋势，立即保存并返回统计信息"""
         scroll_times = action_params.get('scroll_times', 10)
         max = action_params.get('max', 50)
         reset = action_params.get('reset', True)
@@ -206,24 +162,43 @@ class TwitterTrendingActor(BaseActor):
 
         # 根据 reset 参数决定是否重置收集器
         if reset:
-            logger.info("重置收集器，开始新的抓取会话")
+            logger.info("[趋势] 重置收集器，开始新的抓取会话")
             self.resources = []
             self.stop_scroll = False
         else:
-            logger.info(f"累加模式，当前已有 {len(self.resources)} 条数据")
+            logger.info(f"[趋势] 累加模式，当前已有 {len(self.resources)} 条数据")
 
         # 滚动
         for i in range(scroll_times):
             if self.stop_scroll:
-                logger.info("已获取趋势数据，停止滚动")
+                logger.info("[趋势] 已获取趋势数据，停止滚动")
                 break
 
-            logger.info(f"第 {i + 1} 次滚动...")
+            logger.info(f"[趋势] 第 {i + 1} 次滚动...")
             from core.utils import HumanUtils
             await HumanUtils.smart_scroll(task.page, 1, 3)
 
-        # 提取结果
-        return await self.action_extract_trends(task, {"max": max})
+        # 保存数据并返回统计信息
+        count = min(len(self.resources), max)
+
+        # 保存数据
+        saved_to = None
+        stats = None
+        if self.resources:
+            from core.task_storage import TaskStorage
+            storage = TaskStorage()
+            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
+            stats = storage.merge_to_database(task.task_config.name, self.resources)
+            saved_to = str(raw_file)
+            logger.info(f"[趋势] 保存完成: raw={raw_file.name}, added={stats['added']}, skipped={stats['skipped']}")
+
+        return {
+            "status": "success",
+            "page_type": "trending",
+            "total_collected": count,
+            "saved_to": saved_to,
+            "storage_stats": stats
+        }
 
     # ===== 响应拦截处理 =====
 
@@ -314,31 +289,4 @@ class TwitterTrendingActor(BaseActor):
         return resource
 
     # ===== 数据保存 =====
-
-    async def _save_data(self, task) -> str:
-        """保存收集的数据"""
-        if not self.resources:
-            logger.warning(f"[{self.actor_name}] No resources to save")
-            return None
-
-        try:
-            from core.task_storage import TaskStorage
-            storage = TaskStorage()
-
-            # 1. 保存原始JSON
-            raw_file = storage.save_raw_result(task.task_config.name, self.resources)
-
-            # 2. 合并到数据库
-            stats = storage.merge_to_database(task.task_config.name, self.resources)
-
-            logger.info(
-                f"[{self.actor_name}] Data saved: "
-                f"raw={raw_file.name}, "
-                f"added={stats['added']}, "
-                f"skipped={stats['skipped']}"
-            )
-
-            return str(raw_file)
-        except Exception as e:
-            logger.error(f"[{self.actor_name}] Error saving data: {e}")
-            return None
+    # 数据保存已移至 scroll_and_extract 中进行

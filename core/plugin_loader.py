@@ -51,6 +51,15 @@ def discover_actors() -> Dict[str, Type[BaseActor]]:
     except Exception as e:
         logger.error(f"加载 TwitterArticleActor 失败: {e}")
 
+    # 手动导入 TwitterTweetActor（使用异步 API）
+    try:
+        from actors.twitter_tweet_actor import TwitterTweetActor
+        ActorRegistry.register("twitter_tweet_actor", TwitterTweetActor)
+        actors["twitter_tweet_actor"] = TwitterTweetActor
+        logger.info("已注册 Actor: twitter_tweet_actor")
+    except Exception as e:
+        logger.error(f"加载 TwitterTweetActor 失败: {e}")
+
     # 手动导入 RedditCommunityActor（使用异步 API）
     try:
         from actors.reddit_community_actor import RedditCommunityActor
@@ -59,6 +68,15 @@ def discover_actors() -> Dict[str, Type[BaseActor]]:
         logger.info("已注册 Actor: reddit_community_actor")
     except Exception as e:
         logger.error(f"加载 RedditCommunityActor 失败: {e}")
+
+    # 手动导入 RedditPostActor（使用异步 API）
+    try:
+        from actors.reddit_post_actor import RedditPostActor
+        ActorRegistry.register("reddit_post_actor", RedditPostActor)
+        actors["reddit_post_actor"] = RedditPostActor
+        logger.info("已注册 Actor: reddit_post_actor")
+    except Exception as e:
+        logger.error(f"加载 RedditPostActor 失败: {e}")
 
     # 手动导入 ProductHuntActor（纯API模式，无需浏览器）
     try:
