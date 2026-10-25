@@ -16,6 +16,7 @@ from urllib.parse import urlencode, urlparse, parse_qs
 
 from core.base_actor import BaseActor
 from core.models import Resource, Author, Analytics
+from core.page_extract import extract_and_save
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,27 @@ class BingSearchActor(BaseActor):
         self.register_action(
             "create",
             self.action_create,
-            description="初始化任务并导航到搜索页面",
+            description="初始化任务并导航到搜索页面（query 或任意 url；hl/gl 为地区×语言提示）",
             params_schema={
                 "params": [
-                    {"name": "url", "type": "string", "required": True, "description": "Bing 搜索 URL"}
+                    {"name": "query", "type": "string", "required": False, "description": "搜索关键词"},
+                    {"name": "url", "type": "string", "required": False, "description": "Bing 搜索 URL（可选，如提供则直接使用）"},
+                    {"name": "hl", "type": "string", "required": False, "description": "界面语言（映射 setlang，如 zh-CN）"},
+                    {"name": "gl", "type": "string", "required": False, "description": "国家/地区（映射 cc，如 US）"}
+                ]
+            }
+        )
+
+        self.register_action(
+            "extract_page",
+            lambda task, action_params: extract_and_save(
+                task, self.actor_name,
+                max_sections=action_params.get("max_sections", 20),
+            ),
+            description="抽取当前已导航页面的 title/meta/H2 章节（任意 URL，通用选择器）",
+            params_schema={
+                "params": [
+                    {"name": "max_sections", "type": "integer", "required": False, "default": 20}
                 ]
             }
         )
@@ -150,20 +168,32 @@ class BingSearchActor(BaseActor):
 
     async def action_create(self, task, action_params: Dict[str, Any]) -> Dict[str, Any]:
         """初始化任务并导航到搜索页面"""
+        query = action_params.get("query", "")
         url = action_params.get("url", "")
 
-        if not url:
-            return {"status": "error", "message": "url is required"}
+        # 如果提供了 query，构建 Bing 搜索 URL
+        if query:
+            self.current_query = query
+            query_params: Dict[str, Any] = {"q": query}
+            # 地区×语言提示：hl→setlang，gl→cc（缺省不拼，保持原行为）
+            if action_params.get("hl"):
+                query_params["setlang"] = action_params["hl"]
+            if action_params.get("gl"):
+                query_params["cc"] = action_params["gl"]
+            url = f"{self.SEARCH_URL}?{urlencode(query_params)}"
+        elif url:
+            # 如果提供了 url，从中提取查询参数
+            self.current_url = url
+            try:
+                parsed = urlparse(url)
+                params = parse_qs(parsed.query)
+                self.current_query = params.get("q", [""])[0]
+            except:
+                self.current_query = ""
+        else:
+            return {"status": "error", "message": "query or url is required"}
 
         self.current_url = url
-
-        # 从 URL 中提取查询参数
-        try:
-            parsed = urlparse(url)
-            params = parse_qs(parsed.query)
-            self.current_query = params.get("q", [""])[0]
-        except:
-            self.current_query = ""
 
         logger.info(f"[create] 导航到: {url}")
         logger.info(f"[create] 查询: {self.current_query}")
