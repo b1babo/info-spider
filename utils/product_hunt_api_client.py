@@ -19,9 +19,9 @@ def fetch_data(query, api_key,variables=None):
         'Content-Type': 'application/json',
     }
     if variables:
-      response = requests.post(url, headers=headers, json={'query': query,"variables":variables})
+      response = requests.post(url, headers=headers, json={'query': query,"variables":variables}, timeout=60)
     else:
-        response = requests.post(url, headers=headers, json={'query': query})
+        response = requests.post(url, headers=headers, json={'query': query}, timeout=60)
     return response.json()
 
 class ProductHunt:

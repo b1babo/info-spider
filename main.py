@@ -93,7 +93,7 @@ def load_and_validate_config(path: str) -> AppConfig:
 def check_server(url: str = SERVER_URL) -> bool:
     """检查服务器是否运行"""
     try:
-        response = httpx.get(f"{url}/health", timeout=2)
+        response = httpx.get(f"{url}/health", timeout=10)
         return response.status_code == 200
     except:
         return False

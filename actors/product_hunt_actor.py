@@ -82,28 +82,9 @@ class ProductHuntActor(BaseActor):
         if not self.api_client:
             self.api_client = ProductHunt(api_key=api_key)
 
-        # 测试 API 连通性（获取最近 1 个产品）
-        try:
-            logger.info(f"[create] 测试 API 连通性...")
-            today = datetime.now(timezone.utc)
-            test_products = self.api_client.query_posts_data(
-                per_page=1,
-                date_from=today - timedelta(days=1),
-                date_to=today,
-                topic=""
-            )
-
-            if test_products:
-                logger.info(f"[create] API 连通成功，测试获取到 {len(test_products)} 个产品")
-            else:
-                logger.warning(f"[create] API 连通成功但未返回数据")
-
-        except Exception as e:
-            logger.error(f"[create] API 连通性测试失败: {e}")
-            return {
-                "status": "error",
-                "message": f"API connectivity test failed: {str(e)}"
-            }
+        # 跳过 API 连通性测试，直接初始化
+        # （避免测试查询导致超时）
+        logger.info(f"[create] 跳过 API 测试，直接初始化")
 
         # 清空之前收集的数据
         self.resources = []
